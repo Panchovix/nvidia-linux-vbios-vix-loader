@@ -1,0 +1,4 @@
+# Install in /etc/dnf/libdnf5-plugins/actions.d/; requires libdnf5-plugin-actions.
+# Host-only, once per transaction; propagate failures instead of logging success.
+# Options use spaces as required by libdnf5-actions >= 1.4.0.
+post_transaction:::enabled=host-only raise_error=1:/usr/libexec/nvidia-vbios lifecycle post-transaction

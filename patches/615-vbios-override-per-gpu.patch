@@ -1,0 +1,277 @@
+Per-GPU VBIOS override for NVIDIA open modules 615.71.09.
+Uses RegistryBinaryFilePerDevice and KernelGsp-owned memory.
+--- /dev/null
++++ b/src/nvidia/inc/kernel/gpu/gsp/vbios_override_image.h
+@@ -0,0 +1,61 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef VBIOS_OVERRIDE_IMAGE_H
++#define VBIOS_OVERRIDE_IMAGE_H
++
++#include "nvtypes.h"
++
++#define NV_VBIOS_OVERRIDE_MODE_KEY    "RmLinuxVbiosOverride"
++#define NV_VBIOS_OVERRIDE_SIZE_KEY    "RmLinuxVbiosOverrideSize"
++#define NV_VBIOS_OVERRIDE_IMAGE_KEY   "RmLinuxVbiosOverrideImage"
++#define NV_VBIOS_OVERRIDE_DISABLE_KEY "RmLinuxVbiosOverrideDisable"
++#define NV_VBIOS_OVERRIDE_MAX_SIZE    (4U * 1024U * 1024U)
++
++/* Pure, bounded parser, also compiled by the userspace regression harness.
++ * pciId is the PCI configuration dword: device in bits 31:16, vendor in 15:0.
++ * A full dump must contain exactly one legacy image, for this physical GPU.
++ */
++static inline NvBool
++kgspVbiosOverrideFindLegacy(const NvU8 *image, NvU32 size,
++                          NvU32 pciId, NvU32 *offset)
++{
++    NvU32 off, found = 0, selected = 0;
++
++    if (image == 0 || offset == 0 || size < 0x200 ||
++        size > NV_VBIOS_OVERRIDE_MAX_SIZE)
++        return NV_FALSE;
++
++    for (off = 0; off <= size - 0x200; off += 0x200)
++    {
++        NvU32 pcir, relative, length, id, j;
++        NvU8 checksum = 0;
++
++        if (image[off] != 0x55 || image[off + 1] != 0xAA)
++            continue;
++        relative = image[off + 0x18] | ((NvU32)image[off + 0x19] << 8);
++        if (relative > size - off - 0x18)
++            continue;
++        pcir = off + relative;
++        if (image[pcir] != 'P' || image[pcir + 1] != 'C' ||
++            image[pcir + 2] != 'I' || image[pcir + 3] != 'R' ||
++            image[pcir + 0x14] != 0)
++            continue;
++
++        id = image[pcir + 4] | ((NvU32)image[pcir + 5] << 8) |
++             ((NvU32)image[pcir + 6] << 16) | ((NvU32)image[pcir + 7] << 24);
++        length = (image[pcir + 0x10] | ((NvU32)image[pcir + 0x11] << 8)) * 512U;
++        if (id != pciId || length == 0 || length > size - off ||
++            relative > length || length - relative < 0x18)
++            return NV_FALSE;
++        for (j = 0; j < length; j++)
++            checksum = (NvU8)(checksum + image[off + j]);
++        if (checksum != 0 || ++found != 1)
++            return NV_FALSE;
++        selected = off;
++    }
++    if (found != 1)
++        return NV_FALSE;
++    *offset = selected;
++    return NV_TRUE;
++}
++
++#endif
+--- a/src/nvidia/generated/g_kernel_gsp_nvoc.h
++++ b/src/nvidia/generated/g_kernel_gsp_nvoc.h
+@@ -565,6 +565,9 @@
+     MEMORY_DESCRIPTOR *pGspArgumentsDescriptor;
+     GSP_ARGUMENTS_CACHED *pGspArgumentsCached;
+     NvP64 pGspArgumentsMappingPriv;
++    // Host VBIOS override ownership is local to this KernelGsp instance.
++    MEMORY_DESCRIPTOR *pVbiosOverrideDescriptor;
++    NvU64 vbiosOverrideSize;
+     MEMORY_DESCRIPTOR *pSysmemHeapDescriptor;
+     MEMORY_DESCRIPTOR *pGspRmBootUcodeMemdesc;
+     NvP64 pGspRmBootUcodeMemdescPriv;
+--- a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c
++++ b/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c
+@@ -24,6 +24,7 @@
+ #include "resserv/rs_server.h"
+ 
+ #include "gpu/gsp/kernel_gsp.h"
++#include "gpu/gsp/vbios_override_image.h"
+ #include "gpu/falcon/kernel_falcon.h"
+ 
+ #include "kernel/core/thread_state.h"
+@@ -4792,6 +4793,9 @@
+ {
+     NV_STATUS nvStatus = NV_OK;
+ 
++    pKernelGsp->pVbiosOverrideDescriptor = NULL;
++    pKernelGsp->vbiosOverrideSize = 0;
++
+     if (!IS_GSP_CLIENT(pGpu))
+         return NV_ERR_NOT_SUPPORTED;
+ 
+@@ -6231,6 +6235,14 @@
+         pGspArgs->bindataArgs.radix3 = memdescGetPhysAddr(pKernelGsp->pExternalBindata, AT_GPU, 0);
+         pGspArgs->bindataArgs.size = pKernelGsp->externalBindataSize;
+     }
++
++    // No global staging buffer: only this GPU's descriptor is exposed to GSP.
++    if (pKernelGsp->pVbiosOverrideDescriptor != NULL)
++    {
++        pGspArgs->vbiosOverrideArgs.pa =
++            memdescGetPhysAddr(pKernelGsp->pVbiosOverrideDescriptor, AT_GPU, 0);
++        pGspArgs->vbiosOverrideArgs.size = pKernelGsp->vbiosOverrideSize;
++    }
+ }
+ 
+ /*!
+@@ -6880,6 +6892,106 @@
+  *   - GSP_ARGUMENTS_CACHED page
+  *   - sysmem heap (only on zero-FB platforms)
+  */
++static void
++_kgspVbiosOverrideFree(KernelGsp *pKernelGsp)
++{
++    if (pKernelGsp->pVbiosOverrideDescriptor != NULL)
++    {
++        memdescFree(pKernelGsp->pVbiosOverrideDescriptor);
++        memdescDestroy(pKernelGsp->pVbiosOverrideDescriptor);
++        pKernelGsp->pVbiosOverrideDescriptor = NULL;
++    }
++    pKernelGsp->vbiosOverrideSize = 0;
++}
++
++/* RegistryBinaryFilePerDevice has already read the file during Linux probe.
++ * Read only this GPU's registry in this path; no request_firmware under RM locks.
++ * The host-only binary entry remains available for a later GSP reinitialization.
++ */
++static void
++_kgspVbiosOverridePrepare(OBJGPU *pGpu, KernelGsp *pKernelGsp, NvU64 memdescFlags)
++{
++    NvU32 mode = 0, disabled = 0, size = 0, actualSize, skip = 0;
++    NvU8 *image = NULL;
++    NvU64 allocSize;
++    NvP64 va = NvP64_NULL, priv = NvP64_NULL;
++    NV_STATUS status = NV_OK;
++
++    _kgspVbiosOverrideFree(pKernelGsp);
++    if ((osReadRegistryDword(NULL, NV_VBIOS_OVERRIDE_DISABLE_KEY, &disabled) == NV_OK) && disabled)
++        return;
++    if (osReadRegistryDword(pGpu, NV_VBIOS_OVERRIDE_MODE_KEY, &mode) != NV_OK || mode == 0)
++        return;
++    if (mode != 2 ||
++        osReadRegistryDword(pGpu, NV_VBIOS_OVERRIDE_SIZE_KEY, &size) != NV_OK ||
++        size < 0x200 || size > NV_VBIOS_OVERRIDE_MAX_SIZE)
++    {
++        status = NV_ERR_INVALID_ARGUMENT;
++        goto done;
++    }
++
++    image = portMemAllocNonPaged(size);
++    if (image == NULL)
++    {
++        status = NV_ERR_NO_MEMORY;
++        goto done;
++    }
++    actualSize = size;
++    status = osReadRegistryBinary(pGpu, NV_VBIOS_OVERRIDE_IMAGE_KEY, image, &actualSize);
++    if (status != NV_OK)
++        goto done;
++    if (actualSize != size ||
++        !kgspVbiosOverrideFindLegacy(image, size, pGpu->idInfo.PCIDeviceID, &skip))
++    {
++        status = NV_ERR_INVALID_DATA;
++        goto done;
++    }
++
++    allocSize = NV_ALIGN_UP64((NvU64)(size - skip), RM_PAGE_SIZE);
++    status = memdescCreate(&pKernelGsp->pVbiosOverrideDescriptor, pGpu,
++                           allocSize, RM_PAGE_SIZE, NV_TRUE, ADDR_SYSMEM,
++                           NV_MEMORY_UNCACHED, memdescFlags);
++    if (status != NV_OK)
++    {
++        pKernelGsp->pVbiosOverrideDescriptor = NULL;
++        goto done;
++    }
++    memdescTagAlloc(status, NV_FB_ALLOC_RM_INTERNAL_OWNER_BOOTLOADER_ARGS,
++                    pKernelGsp->pVbiosOverrideDescriptor);
++    if (status != NV_OK)
++    {
++        memdescDestroy(pKernelGsp->pVbiosOverrideDescriptor);
++        pKernelGsp->pVbiosOverrideDescriptor = NULL;
++        goto done;
++    }
++    if (!memdescCheckContiguity(pKernelGsp->pVbiosOverrideDescriptor, AT_GPU))
++    {
++        status = NV_ERR_MEMORY_ERROR;
++        goto done;
++    }
++    status = memdescMap(pKernelGsp->pVbiosOverrideDescriptor, 0, allocSize,
++                        NV_TRUE, NV_PROTECT_READ_WRITE, &va, &priv);
++    if (status != NV_OK)
++        goto done;
++    portMemSet(NvP64_VALUE(va), 0, allocSize);
++    portMemCopy(NvP64_VALUE(va), allocSize, image + skip, size - skip);
++    memdescUnmap(pKernelGsp->pVbiosOverrideDescriptor, NV_TRUE, va, priv);
++    pKernelGsp->vbiosOverrideSize = size - skip;
++    NV_PRINTF(LEVEL_WARNING,
++        "vbios_override: GPU %04x:%02x:%02x selected: %u bytes from offset 0x%x staged for GSP\n",
++        gpuGetDomain(pGpu), gpuGetBus(pGpu), gpuGetDevice(pGpu), size - skip, skip);
++
++done:
++    portMemFree(image);
++    if (status != NV_OK)
++    {
++        _kgspVbiosOverrideFree(pKernelGsp);
++        NV_PRINTF(LEVEL_ERROR,
++            "vbios_override: GPU %04x:%02x:%02x rejected override (0x%x); using stock VBIOS\n",
++            gpuGetDomain(pGpu), gpuGetBus(pGpu), gpuGetDevice(pGpu), status);
++    }
++}
++
+ NV_STATUS
+ kgspAllocBootArgsCommon
+ (
+@@ -6973,6 +7085,7 @@
+                                NV_ERR_MEMORY_ERROR, exit_cleanup);
+     }
+ 
++    _kgspVbiosOverridePrepare(pGpu, pKernelGsp, memdescFlags);
+     return nvStatus;
+ 
+ exit_cleanup:
+@@ -6990,6 +7103,8 @@
+     KernelGsp *pKernelGsp
+ )
+ {
++    _kgspVbiosOverrideFree(pKernelGsp);
++
+     // release libos init argument resources
+     if (pKernelGsp->pLibosInitArgumentsCached != NULL)
+     {
+--- a/src/nvidia/arch/nvalloc/unix/src/registry.c
++++ b/src/nvidia/arch/nvalloc/unix/src/registry.c
+@@ -538,6 +538,13 @@
+ 
+     while ((pRegEntry != NULL) && (pRegEntry->regParmStr != NULL))
+     {
++        // Host staging data must not be copied into the GSP registry RPC.
++        if (portStringCompare(pRegEntry->regParmStr, "RmLinuxVbiosOverrideImage",
++                              sizeof("RmLinuxVbiosOverrideImage")) == 0)
++        {
++            pRegEntry = pRegEntry->next;
++            continue;
++        }
+         size += portStringLength(pRegEntry->regParmStr) + 1 + pRegEntry->len;
+         numEntries++;
+         pRegEntry = pRegEntry->next;
+@@ -562,6 +569,13 @@
+     // Walk the records and copy the data.
+     while ((pRegEntry != NULL) && (pRegEntry->regParmStr != NULL))
+     {
++        // Keep the count and copy passes identical for this host-only entry.
++        if (portStringCompare(pRegEntry->regParmStr, "RmLinuxVbiosOverrideImage",
++                              sizeof("RmLinuxVbiosOverrideImage")) == 0)
++        {
++            pRegEntry = pRegEntry->next;
++            continue;
++        }
+         PACKED_REGISTRY_ENTRY *pEntry = &pRegTable->entries[entryIndex];
+         NvU32 slen = portStringLength(pRegEntry->regParmStr) + 1;
+ 
+--- a/kernel-open/nvidia/nv.c
++++ b/kernel-open/nvidia/nv.c
+@@ -120,6 +120,7 @@
+ 
+ MODULE_INFO(supported, "external");
+ MODULE_VERSION(NV_VERSION_STRING);
++MODULE_INFO(vbios_override_per_gpu, "1");
+ MODULE_DESCRIPTION("NVIDIA core GPU kernel module");
+ MODULE_ALIAS_CHARDEV_MAJOR(NV_MAJOR_DEVICE_NUMBER);
+ 

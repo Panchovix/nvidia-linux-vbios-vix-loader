@@ -1,0 +1,12 @@
+[Unit]
+Description=Retry blocked NVIDIA kernel updates and audit the ready deployment
+ConditionPathExists=/etc/nvidia-vbios/lifecycle.json
+
+[Timer]
+OnBootSec=3min
+OnUnitInactiveSec=15min
+RandomizedDelaySec=30s
+Unit=nvidia-vbios-reconcile.service
+
+[Install]
+WantedBy=timers.target

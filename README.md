@@ -1,0 +1,135 @@
+# NVIDIA Linux VBIOS Vix Loader
+
+English | [Español](README_es.md)
+
+Loads a modified VBIOS for each NVIDIA GPU at boot on Linux, **in memory**: the card's flash chip is never
+written. It patches the NVIDIA open kernel modules so the GSP firmware starts with your VBIOS image, builds
+them in a separate boot entry, rebuilds them automatically after kernel updates, and keeps your normal boot
+entry as a fallback.
+
+Thanks to **@pantsoftime** ([overclock.net](https://www.overclock.net)), whose original `vbios_override` patch
+this project is built on. Without it, none of this would have been possible.
+
+To edit VBIOS files, use a VBIOS editor such as
+[NVIDIA VBIOS Vix Editor](https://github.com/Panchovix/nvidia-vbios-vix-editor). This repository only loads them.
+
+> **Warning.** A modified VBIOS can raise power, clocks and voltages beyond the card's design limits. You can
+> damage hardware. Keep a copy of your original ROM and use this at your own risk.
+
+## Status
+
+| Platform | State |
+| --- | --- |
+| Fedora 43, GRUB/BLS, dracut, DNF5, NVIDIA 615.x open kernel modules installed with the `.run` installer | **Supported**: used on real hardware with Blackwell and Ada GPUs |
+| Fedora with akmods/RPM Fusion drivers, RHEL family, Debian/Ubuntu, Arch/CachyOS/EndeavourOS, systemd-boot, UKI, Secure Boot | **Experimental**: synthetic and container tests only |
+| rpm-ostree, proprietary NVIDIA kernel modules, drivers older than 615 | Not supported |
+
+GPUs: Blackwell GB20x (GeForce RTX 50, RTX PRO Blackwell) is the tested path. Ada payloads larger than
+512 KiB are refused. Ampere is in scope of the checks but has not been tested.
+
+## What you need
+
+- A working NVIDIA 615.x driver with the **open** kernel modules; `nvidia-smi` must list your GPUs.
+- The unpatched source of the open kernel modules for the **exact** installed version, for example:
+  `git clone --depth 1 --branch 615.78.08 https://github.com/NVIDIA/open-gpu-kernel-modules`
+- Python 3.11 or newer, the headers for the running kernel (`kernel-devel` on Fedora), `make`, `dracut`,
+  `grub2-editenv` and `mokutil`. With DNF5, also `libdnf5-plugin-actions`.
+- GRUB with `GRUB_DEFAULT=saved` and `GRUB_ENABLE_BLSCFG=true` (Fedora's defaults).
+- Secure Boot off, or your own module signing key: pass `--signing-key` and `--signing-certificate` to `prepare`.
+- One VBIOS **payload** per GPU: a single-chain image for that exact card. Full ROM dumps that contain two
+  banks are refused. With Vix Editor's command-line tool: `./nvbios-<version>-linux-x86_64 normalize edited.rom gpu0.bin`.
+
+## Install
+
+Run these from a clone of this repository.
+
+1. List the GPUs. Note each GPU's index (as in `nvidia-smi`) and match it to its own payload.
+
+   ```sh
+   sudo ./nvbios system devices
+   ```
+
+2. Prepare a profile, with one `--device` per GPU. Use `--userspace manual` for a `.run` driver install;
+   leave it out for packaged drivers. This step only writes the output directory.
+
+   ```sh
+   sudo ./nvbios system prepare \
+     --device 0 /path/to/gpu0.bin \
+     --device 1 /path/to/gpu1.bin \
+     --driver-source /path/to/open-gpu-kernel-modules \
+     --userspace manual --output "$PWD/gpu-profile"
+   ```
+
+   A device can also be selected by GPU UUID or PCI address (`--device 0000:03:00.0 ...`).
+
+3. Install the tool and enroll the profile. `--dry-run` shows what would change.
+
+   ```sh
+   sudo ./nvbios system install --repository "$PWD"
+   sudo /usr/local/bin/nvbios system enroll --profile "$PWD/gpu-profile/profile.json"
+   ```
+
+4. Build the modules and the boot entry, which becomes the default, then turn on automatic rebuilds after
+   updates. Building takes a few minutes.
+
+   ```sh
+   sudo /usr/local/bin/nvbios system reconcile --kernel "$(uname -r)"
+   sudo /usr/local/bin/nvbios system enable --kernel "$(uname -r)"
+   sudo /usr/local/bin/nvbios system status
+   ```
+
+5. Reboot. Your normal entry stays in the boot menu. After the reboot, `sudo nvbios system status` compares the
+   loaded module and parameters with the prepared ones.
+
+## Kernel and driver updates
+
+- **Kernel updates** are handled automatically: the package hook and a retry timer rebuild the modules and the
+  boot entry for the new kernel.
+- **Driver updates** (`.run` installs): run `sudo nvbios system pre-install` before removing the old driver,
+  install the new driver, then register the matching unpatched source of the new version:
+
+  ```sh
+  sudo nvbios system post-install --source /path/to/open-gpu-kernel-modules-NEW
+  ```
+
+  It builds and selects the new boot entry and resumes automatic updates. Reboot when it finishes.
+
+## If something goes wrong
+
+- Choose your **normal** entry in the boot menu; it does not load any override.
+- `sudo nvbios system disable` stops automatic rebuilds and restores the normal entry as default.
+- `sudo nvbios system rollback TRANSACTION_ID` undoes one install, enroll or enable step; the IDs are printed
+  by those commands.
+
+## Uninstall (Fedora)
+
+There is no uninstall command yet. After a kernel update, the modules this tool builds can be the **only** NVIDIA
+kernel modules for that kernel, and the normal boot entry may load them too. Restore normal modules first:
+
+1. `sudo nvbios system disable`.
+2. For every kernel you keep, install normal NVIDIA modules of the same driver version: re-run the NVIDIA `.run`
+   installer for that kernel (`--kernel-name=KERNEL`), or let akmods/DKMS rebuild them for packaged drivers. Then
+   rebuild its normal initramfs with `sudo dracut -f --kver KERNEL`.
+3. Temporarily move `/usr/lib/modules/*/updates/vbios-override` aside (for example to `/var/backups/vbios-override`),
+   run `sudo depmod -a KERNEL` for each kernel, reboot into the normal entry and check that `nvidia-smi` works.
+4. Only then remove the backup and:
+   - `/usr/local/bin/nvbios`, `/usr/libexec/nvidia-vbios` and `/usr/local/lib/nvidia-vbios-tools`
+   - `/etc/nvidia-vbios` and `/var/lib/nvidia-vbios`
+   - `/usr/lib/systemd/system/nvidia-vbios-reconcile.{service,path,timer}`, then `sudo systemctl daemon-reload`
+   - `/usr/lib/kernel/install.d/99-nvidia-vbios.install` and `/etc/dnf/libdnf5-plugins/actions.d/nvidia-vbios.actions`
+   - the managed boot files `/boot/loader/entries/vbios-*.conf` and `/boot/initramfs-*-vbios-*.img`
+   - `/usr/lib/firmware/nvidia/*/vbios-override`
+
+If `nvidia-smi` fails in step 3, move the directory back, run `depmod -a KERNEL` again and fix step 2 first.
+
+## Tests
+
+```sh
+PYTHONPATH=src python3 -m unittest discover -s tests
+```
+
+The tests use synthetic files only; they never touch a GPU, `/boot` or the installed system.
+
+## License
+
+MIT. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

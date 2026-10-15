@@ -1,0 +1,18 @@
+[Unit]
+Description=Validate and reconcile NVIDIA VBIOS override for the latest Fedora kernel
+After=local-fs.target akmods.service
+ConditionPathExists=/etc/nvidia-vbios/lifecycle.json
+ConditionPathExists=!/run/ostree-booted
+
+[Service]
+Type=oneshot
+# Block ordinary shutdown/reboot while a build or boot publication is in progress.
+ExecStart=/usr/bin/systemd-inhibit --what=shutdown:sleep --mode=block --who=nvidia-vbios --why=Validating-NVIDIA-kernel-update /usr/libexec/nvidia-vbios lifecycle reconcile
+TimeoutStartSec=2h
+UMask=0077
+Nice=10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/nvidia-vbios /usr/lib/modules /usr/lib/firmware/nvidia /boot /run/akmods /usr/lib/sysimage/rpm

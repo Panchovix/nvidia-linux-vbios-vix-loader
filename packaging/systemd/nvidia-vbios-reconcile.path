@@ -1,0 +1,11 @@
+[Unit]
+Description=Queue NVIDIA reconciliation after update requests or enrollment changes
+ConditionPathExists=/etc/nvidia-vbios/lifecycle.json
+
+[Path]
+PathChanged=/var/lib/nvidia-vbios/lifecycle/pending
+PathChanged=/etc/nvidia-vbios/lifecycle.json
+Unit=nvidia-vbios-reconcile.service
+
+[Install]
+WantedBy=multi-user.target

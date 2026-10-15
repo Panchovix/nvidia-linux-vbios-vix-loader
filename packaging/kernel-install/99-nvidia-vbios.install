@@ -1,0 +1,8 @@
+#!/bin/sh
+# Queue only. Kernel-install can execute before matching kernel-devel and akmods.
+set -eu
+case "${1-}" in
+    add|remove)
+        /usr/libexec/nvidia-vbios lifecycle queue "$1" "${2-}"
+        ;;
+esac

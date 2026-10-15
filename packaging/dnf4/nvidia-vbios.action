@@ -1,0 +1,3 @@
+# Install in /etc/dnf/plugins/post-transaction-actions.d/; requires DNF4 actions plugin.
+# DNF4 deduplicates identical commands across matching packages.
+*:any:/usr/libexec/nvidia-vbios lifecycle post-transaction

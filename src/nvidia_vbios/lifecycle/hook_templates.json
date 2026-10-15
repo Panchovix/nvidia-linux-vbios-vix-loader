@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "templates": [
+    {
+      "source": "kernel-install/99-nvidia-vbios.install",
+      "destination": "/usr/lib/kernel/install.d/99-nvidia-vbios.install",
+      "mode": 493,
+      "text": "#!/bin/sh\n# Queue only. Kernel-install can execute before matching kernel-devel and akmods.\nset -eu\ncase \"${1-}\" in\n    add|remove)\n        /usr/libexec/nvidia-vbios lifecycle queue \"$1\" \"${2-}\"\n        ;;\nesac\n"
+    },
+    {
+      "source": "systemd/nvidia-vbios-reconcile.service",
+      "destination": "/usr/lib/systemd/system/nvidia-vbios-reconcile.service",
+      "mode": 420,
+      "text": "[Unit]\nDescription=Validate and reconcile NVIDIA VBIOS override for the latest Fedora kernel\nAfter=local-fs.target akmods.service\nConditionPathExists=/etc/nvidia-vbios/lifecycle.json\nConditionPathExists=!/run/ostree-booted\n\n[Service]\nType=oneshot\n# Block ordinary shutdown/reboot while a build or boot publication is in progress.\nExecStart=/usr/bin/systemd-inhibit --what=shutdown:sleep --mode=block --who=nvidia-vbios --why=Validating-NVIDIA-kernel-update /usr/libexec/nvidia-vbios lifecycle reconcile\nTimeoutStartSec=2h\nUMask=0077\nNice=10\nNoNewPrivileges=yes\nProtectSystem=strict\nProtectHome=yes\nPrivateTmp=yes\nReadWritePaths=/var/lib/nvidia-vbios /usr/lib/modules /usr/lib/firmware/nvidia /boot /run/akmods /usr/lib/sysimage/rpm\n"
+    },
+    {
+      "source": "systemd/nvidia-vbios-reconcile.path",
+      "destination": "/usr/lib/systemd/system/nvidia-vbios-reconcile.path",
+      "mode": 420,
+      "text": "[Unit]\nDescription=Queue NVIDIA reconciliation after update requests or enrollment changes\nConditionPathExists=/etc/nvidia-vbios/lifecycle.json\n\n[Path]\nPathChanged=/var/lib/nvidia-vbios/lifecycle/pending\nPathChanged=/etc/nvidia-vbios/lifecycle.json\nUnit=nvidia-vbios-reconcile.service\n\n[Install]\nWantedBy=multi-user.target\n"
+    },
+    {
+      "source": "systemd/nvidia-vbios-reconcile.timer",
+      "destination": "/usr/lib/systemd/system/nvidia-vbios-reconcile.timer",
+      "mode": 420,
+      "text": "[Unit]\nDescription=Retry blocked NVIDIA kernel updates and audit the ready deployment\nConditionPathExists=/etc/nvidia-vbios/lifecycle.json\n\n[Timer]\nOnBootSec=3min\nOnUnitInactiveSec=15min\nRandomizedDelaySec=30s\nUnit=nvidia-vbios-reconcile.service\n\n[Install]\nWantedBy=timers.target\n"
+    },
+    {
+      "source": "dnf5/nvidia-vbios.actions",
+      "destination": "/etc/dnf/libdnf5-plugins/actions.d/nvidia-vbios.actions",
+      "mode": 420,
+      "text": "# Install in /etc/dnf/libdnf5-plugins/actions.d/; requires libdnf5-plugin-actions.\n# Host-only, once per transaction; propagate failures instead of logging success.\n# Options use spaces as required by libdnf5-actions >= 1.4.0.\npost_transaction:::enabled=host-only raise_error=1:/usr/libexec/nvidia-vbios lifecycle post-transaction\n"
+    },
+    {
+      "source": "dnf4/nvidia-vbios.action",
+      "destination": "/etc/dnf/plugins/post-transaction-actions.d/nvidia-vbios.action",
+      "mode": 420,
+      "text": "# Install in /etc/dnf/plugins/post-transaction-actions.d/; requires DNF4 actions plugin.\n# DNF4 deduplicates identical commands across matching packages.\n*:any:/usr/libexec/nvidia-vbios lifecycle post-transaction\n"
+    }
+  ]
+}

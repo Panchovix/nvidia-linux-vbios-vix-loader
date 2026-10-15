@@ -1,0 +1,291 @@
+Probe-scoped native binary registry loader backport from NVIDIA 615.71.09 (MIT).
+Authored against actual NVIDIA 595.45.04 sources. This supplies the Linux loader
+only; it DOES NOT supply or establish firmware support for vbiosOverrideArgs.
+Use the adaptive library for complete structural checks and transactional source copies.
+
+--- a/kernel-open/nvidia/nv-reg.h
++++ b/kernel-open/nvidia/nv-reg.h
+@@ -252,6 +252,10 @@
+  */
+ 
+ #define __NV_REGISTRY_DWORDS_PER_DEVICE RegistryDwordsPerDevice
++
++/* Probe-scoped binary registry firmware (NVIDIA 615 backport). */
++#define __NV_REGISTRY_BINARY_FILE_PER_DEVICE RegistryBinaryFilePerDevice
++#define NV_REG_REGISTRY_BINARY_FILE_PER_DEVICE NV_REG_STRING(__NV_REGISTRY_BINARY_FILE_PER_DEVICE)
+ #define NV_REG_REGISTRY_DWORDS_PER_DEVICE NV_REG_STRING(__NV_REGISTRY_DWORDS_PER_DEVICE)
+ 
+ #define __NV_RM_MSG RmMsg
+@@ -1075,6 +1079,7 @@
+ NV_DEFINE_REG_STRING_ENTRY(__NV_COHERENT_GPU_MEMORY_MODE, NULL);
+ NV_DEFINE_REG_STRING_ENTRY(__NV_REGISTRY_DWORDS, NULL);
+ NV_DEFINE_REG_STRING_ENTRY(__NV_REGISTRY_DWORDS_PER_DEVICE, NULL);
++NV_DEFINE_REG_STRING_ENTRY(__NV_REGISTRY_BINARY_FILE_PER_DEVICE, NULL);
+ NV_DEFINE_REG_STRING_ENTRY(__NV_RM_MSG, NULL);
+ NV_DEFINE_REG_STRING_ENTRY(__NV_GPU_BLACKLIST, NULL);
+ NV_DEFINE_REG_STRING_ENTRY(__NV_TEMPORARY_FILE_PATH, NULL);
+--- a/kernel-open/nvidia/os-registry.c
++++ b/kernel-open/nvidia/os-registry.c
+@@ -27,6 +27,142 @@
+ #include "nv-linux.h"
+ #include "nv-reg.h"
+ #include "nv-gpu-info.h"
++#include <linux/firmware.h>
++
++/*
++ * SPDX-FileCopyrightText: Copyright (c) 2000-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++ * SPDX-License-Identifier: MIT
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++ * DEALINGS IN THE SOFTWARE.
++ */
++
++#define NV_BINARY_REGISTRY_FIRMWARE_DIR "nvidia/"
++
++static NV_STATUS
++nv_parse_binary_registry_token(const char *param_name, char *token,
++                               char **key_name, char **path)
++{
++    if ((key_name == NULL) || (path == NULL))
++    {
++        return NV_ERR_INVALID_ARGUMENT;
++    }
++
++    // Extract key name before first '='; reject if missing or empty
++    if (((*key_name = strsep(&token, "=")) == NULL) || !strlen(*key_name))
++    {
++        nv_printf(NV_DBG_ERRORS,
++                  "NVRM: %s contains malformed token: missing key name\n",
++                  param_name);
++        return NV_ERR_INVALID_ARGUMENT;
++    }
++
++    // Extract file path after first '='; reject if missing or empty
++    if (((*path = strsep(&token, "=")) == NULL) || !strlen(*path))
++    {
++        nv_printf(NV_DBG_ERRORS,
++                  "NVRM: %s contains malformed token for key \"%s\": missing path\n",
++                  param_name, *key_name);
++        return NV_ERR_INVALID_ARGUMENT;
++    }
++
++    // Reject tokens with more than one '=' (e.g. "key=path=extra")
++    if (strsep(&token, "=") != NULL)
++    {
++        nv_printf(NV_DBG_ERRORS,
++                  "NVRM: %s contains malformed token for key \"%s\": too many '=' separators\n",
++                  param_name, *key_name);
++        return NV_ERR_INVALID_ARGUMENT;
++    }
++
++    return NV_OK;
++}
++
++static NV_STATUS
++nv_write_binary_registry_file(nvidia_stack_t *sp, nv_state_t *nv,
++                              const char *key_name, const char *relative_path,
++                              const char *param_name)
++{
++    int fw_status;
++    char *firmware_path = NULL;
++    NV_STATUS status;
++    size_t firmware_path_len;
++    const struct firmware *fw = NULL;
++    nv_linux_state_t *nvl;
++
++    if ((nv == NULL) || (key_name == NULL) ||
++        (relative_path == NULL) || (param_name == NULL))
++    {
++        return NV_ERR_INVALID_ARGUMENT;
++    }
++
++    nvl = NV_GET_NVL_FROM_NV_STATE(nv);
++
++    firmware_path_len = strlen(NV_BINARY_REGISTRY_FIRMWARE_DIR) +
++                        strlen(relative_path) + 1;
++
++    status = os_alloc_mem((void **)&firmware_path, firmware_path_len);
++    if (status != NV_OK)
++    {
++        return status;
++    }
++
++    snprintf(firmware_path, firmware_path_len, "%s%s",
++             NV_BINARY_REGISTRY_FIRMWARE_DIR, relative_path);
++
++    fw_status = request_firmware(&fw, firmware_path, nvl->dev);
++    if (fw_status != 0)
++    {
++        nv_printf(NV_DBG_ERRORS,
++                  "NVRM: %s key \"%s\" failed to load firmware file \"%s\" (rc=%d)\n",
++                  param_name, key_name, firmware_path, fw_status);
++        status = NV_ERR_OBJECT_NOT_FOUND;
++        goto done;
++    }
++
++    if (fw->size > NV_U32_MAX)
++    {
++        nv_printf(NV_DBG_ERRORS,
++                  "NVRM: %s key \"%s\" firmware file \"%s\" too large (%zu bytes)\n",
++                  param_name, key_name, firmware_path, fw->size);
++        status = NV_ERR_INVALID_DATA;
++        goto done;
++    }
++
++    status = rm_write_registry_binary(sp, nv, key_name,
++                                      (NvU8 *)fw->data, (NvU32)fw->size);
++    if (status != NV_OK)
++    {
++        nv_printf(NV_DBG_ERRORS,
++                  "NVRM: %s key \"%s\" failed to write registry binary (status=0x%x)\n",
++                  param_name, key_name, status);
++    }
++
++done:
++    if (fw != NULL)
++    {
++        release_firmware(fw);
++    }
++
++    os_free_mem(firmware_path);
++    return status;
++}
++
+ 
+ /*!
+  * @brief This function parses the PCI BDF identifier string and returns the
+@@ -160,6 +296,91 @@
+     os_free_mem(option_string);
+     return status;
+ }
++
++NV_STATUS nv_parse_per_device_binary_option_string(nvidia_stack_t *sp,
++                                                   nv_state_t *current_nv)
++{
++    NV_STATUS status = NV_OK;
++    char *option_string = NULL;
++    char *ptr, *token;
++    char *name, *value;
++    NvU32 domain, bus, slot, func;
++    nv_state_t *nv = NULL;
++
++    if (current_nv == NULL)
++    {
++        return NV_ERR_INVALID_ARGUMENT;
++    }
++
++    if (NVreg_RegistryBinaryFilePerDevice == NULL)
++    {
++        return NV_OK;
++    }
++
++    option_string = rm_remove_spaces(NVreg_RegistryBinaryFilePerDevice);
++    if (option_string == NULL)
++    {
++        return NV_ERR_GENERIC;
++    }
++
++    ptr = option_string;
++
++    while ((token = strsep(&ptr, ";")) != NULL)
++    {
++        if (!strlen(token))
++        {
++            continue;
++        }
++
++        status = nv_parse_binary_registry_token("NVreg_RegistryBinaryFilePerDevice",
++                                                token, &name, &value);
++        if (status != NV_OK)
++        {
++            break;
++        }
++
++        if (strcmp(name, NV_REG_PCI_DEVICE_BDF) == 0)
++        {
++            status = pci_str_to_bdf(value, &domain, &bus, &slot, &func);
++
++            if (status != NV_OK)
++            {
++                nv = NULL;
++                status = NV_OK;
++                continue;
++            }
++
++            if ((current_nv->pci_info.domain == domain) &&
++                (current_nv->pci_info.bus == bus) &&
++                (current_nv->pci_info.slot == slot) &&
++                (current_nv->pci_info.function == func))
++            {
++                nv = current_nv;
++            }
++            else
++            {
++                nv = NULL;
++            }
++            continue;
++        }
++
++        if (nv == NULL)
++        {
++            continue;
++        }
++
++        status = nv_write_binary_registry_file(sp, nv, name,
++                                               value, "NVreg_RegistryBinaryFilePerDevice");
++        if (status != NV_OK)
++        {
++            break;
++        }
++    }
++
++    os_free_mem(option_string);
++    return status;
++}
++
+ 
+ /*!
+  * @brief This function parses the registry keys per GPU device. It accepts a
+--- a/kernel-open/common/inc/nv-proto.h
++++ b/kernel-open/common/inc/nv-proto.h
+@@ -83,6 +83,7 @@
+ NvBool        nv_is_uuid_in_gpu_exclusion_list (const char *);
+ 
+ NV_STATUS     nv_parse_per_device_option_string(nvidia_stack_t *sp);
++NV_STATUS nv_parse_per_device_binary_option_string(nvidia_stack_t *sp, nv_state_t *current_nv);
+ nv_linux_state_t * find_uuid(const NvU8 *uuid);
+ void          nv_report_error(struct pci_dev *dev, NvU32 error_number, const char *format, va_list ap);
+ void          nv_shutdown_adapter(nvidia_stack_t *, nv_state_t *, nv_linux_state_t *);
+--- a/kernel-open/nvidia/nv-pci.c
++++ b/kernel-open/nvidia/nv-pci.c
+@@ -2091,6 +2091,15 @@
+     /* Parse and set any per-GPU registry keys specified. */
+     nv_parse_per_device_option_string(sp);
+ 
++    /* Read only the currently probing GPU's binary firmware. */
++    {
++        NV_STATUS parse_status = nv_parse_per_device_binary_option_string(sp, nv);
++        if (parse_status != NV_OK)
++            NV_DEV_PRINTF(NV_DBG_WARNINGS, nv,
++                          "Per-device binary registry parsing failed (status=0x%x)\n",
++                          parse_status);
++    }
++
+     rm_set_rm_firmware_requested(sp, nv);
+ 
+     nv_check_and_exclude_gpu(sp, nv);
