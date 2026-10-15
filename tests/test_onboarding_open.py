@@ -99,6 +99,14 @@ class OpenOnboardingTests(unittest.TestCase):
             self.assertFalse(self.output.exists())
         self.assertEqual(payload.check_payload(legacy_image(RTX_2000_ADA), 0x10de, RTX_2000_ADA), 'ada')
 
+    def test_ada_limit_counts_from_the_legacy_image(self):
+        # A relocated Ada payload keeps a prefix before its legacy image; only the part from there is loaded.
+        relocated = bytes(0x9400) + legacy_image(RTX_2000_ADA, blocks=1020)
+        self.assertGreater(len(relocated), 512 * 1024)
+        self.assertEqual(payload.gsp_bytes(relocated, 0x10de, RTX_2000_ADA), 1020 * 512)
+        self.prepare(relocated, RTX_2000_ADA)
+        self.assertEqual(json.loads((self.output / 'profile.json').read_text())['devices'][0]['architecture'], 'ada')
+
 
 if __name__ == '__main__':
     unittest.main()

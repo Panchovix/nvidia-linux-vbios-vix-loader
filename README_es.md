@@ -28,7 +28,11 @@ Este repositorio solo la carga.
 por un gestor de paquetes todavía no se maneja de forma segura.
 
 Probado funcionando en: RTX PRO 6000 Blackwell Max-Q, RTX PRO 6000 Blackwell Workstation Edition, GeForce RTX
-5090, 5080, 5070 Ti, 5070 y 5060 Ti. Los payloads de Ada de más de 512 KiB se rechazan.
+5090, 5080, 5070 Ti, 5070, 5060 Ti y RTX 2000 Ada.
+
+El firmware GSP de Ada carga como máximo 512 KiB, contados desde la imagen legacy del payload. Para la RTX 2000 Ada,
+exporta el payload con Vix Editor 0.1.5 o superior: `nvbios normalize editada.rom gpu0.bin --representation ada-relocated-v1`.
+Otras imágenes Ada que superen el límite se rechazan.
 
 ## Qué necesitas
 
@@ -98,9 +102,14 @@ Ejecuta esto desde un clon de este repositorio.
 
   Compila y selecciona la nueva entrada de arranque y reanuda las actualizaciones automáticas. Reinicia al terminar.
 
+  Ejecuta `post-install` **antes de reiniciar**. Mientras tanto, los módulos compilados para el driver anterior tienen
+  prioridad en todas las entradas de arranque, incluida la normal, y el driver NVIDIA no arrancará. Si ya
+  reiniciaste, ejecuta `post-install` desde ese arranque; funciona aunque `nvidia-smi` falle.
+
 ## Si algo sale mal
 
-- Elige tu entrada **normal** en el menú de arranque; no carga ningún override.
+- Elige tu entrada **normal** en el menú de arranque; no carga ningún override. Igual usa los módulos que compiló
+  esta herramienta, así que no sirve tras una actualización del driver sin `post-install` (ver arriba).
 - `sudo nvbios system disable` detiene las recompilaciones automáticas y vuelve a dejar la entrada normal como
   predeterminada.
 - `sudo nvbios system rollback ID_TRANSACCION` deshace un paso de install, enroll o enable; esos comandos

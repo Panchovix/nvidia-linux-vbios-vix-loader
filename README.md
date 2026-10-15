@@ -28,7 +28,11 @@ This repository only loads it.
 is not handled safely yet.
 
 Tested working on: RTX PRO 6000 Blackwell Max-Q, RTX PRO 6000 Blackwell Workstation Edition, GeForce RTX 5090,
-5080, 5070 Ti, 5070 and 5060 Ti. Ada payloads larger than 512 KiB are refused.
+5080, 5070 Ti, 5070, 5060 Ti and RTX 2000 Ada.
+
+Ada GSP firmware loads at most 512 KiB, counted from the payload's legacy image. For the RTX 2000 Ada, export
+the payload with Vix Editor 0.1.5 or newer: `nvbios normalize edited.rom gpu0.bin --representation ada-relocated-v1`.
+Other Ada images that exceed the limit are refused.
 
 ## What you need
 
@@ -97,9 +101,14 @@ Run these from a clone of this repository.
 
   It builds and selects the new boot entry and resumes automatic updates. Reboot when it finishes.
 
+  Run `post-install` **before rebooting**. Until then the modules built for the previous driver take priority in
+  every boot entry, including the normal one, so the NVIDIA driver will not start. If you already rebooted, run
+  `post-install` from that boot; it works even while `nvidia-smi` fails.
+
 ## If something goes wrong
 
-- Choose your **normal** entry in the boot menu; it does not load any override.
+- Choose your **normal** entry in the boot menu; it does not load any override. It still uses the modules this tool
+  built, so it does not help after a driver update without `post-install` (see above).
 - `sudo nvbios system disable` stops automatic rebuilds and restores the normal entry as default.
 - `sudo nvbios system rollback TRANSACTION_ID` undoes one install, enroll or enable step; the IDs are printed
   by those commands.

@@ -53,6 +53,11 @@ def find_legacy(data: bytes, vendor: int, device: int) -> int:
     return found[0]
 
 
+def gsp_bytes(data: bytes, vendor: int, device: int) -> int:
+    """Bytes the patched driver hands to the GSP: from the selected legacy image to the end of the file."""
+    return len(data) - find_legacy(data, vendor, device)
+
+
 def check_payload(data: bytes, vendor: int, device: int) -> str:
     """Validate a payload for this GPU and return its architecture family."""
     if vendor != 0x10de:
