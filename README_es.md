@@ -30,9 +30,15 @@ por un gestor de paquetes todavía no se maneja de forma segura.
 Probado funcionando en: RTX PRO 6000 Blackwell Max-Q, RTX PRO 6000 Blackwell Workstation Edition, GeForce RTX
 5090, 5080, 5070 Ti, 5070, 5060 Ti y RTX 2000 Ada.
 
-El firmware GSP de Ada carga como máximo 512 KiB, contados desde la imagen legacy del payload. Para la RTX 2000 Ada,
-exporta el payload con Vix Editor 0.1.5 o superior: `nvbios normalize editada.rom gpu0.bin --representation ada-relocated-v1`.
-Otras imágenes Ada que superen el límite se rechazan.
+El firmware GSP de Ada carga como máximo 512 KiB, contados desde la imagen legacy del payload, así que los payloads
+de Ada hay que reubicarlos con Vix Editor:
+
+- RTX 2000 Ada (probada): `nvbios normalize editada.rom gpu0.bin --representation ada-relocated-v1` (0.1.5 o superior).
+- **Experimental, sin probar en hardware**: otras GPUs Ada de escritorio y workstation con
+  `--representation ada-relocated-v2` (0.1.6 o superior). Funciona offline con imágenes de RTX 4090, 4080 (SUPER),
+  4070 Ti SUPER, 4070 (SUPER), 4060 Ti, 4060 y RTX 6000/5000/4500/4000 Ada; lo que no verifica se rechaza.
+  Si la pruebas, abre un issue con el resultado.
+- Las imágenes Ada de laptop probadas se rechazan: cuatro no caben y la de la RTX 4090 Laptop no trae imagen UEFI.
 
 ## Varias GPUs
 
