@@ -225,8 +225,8 @@ class BootstrapTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'untrusted'):
             self.worker.install(self.repository)
 
-    def test_enroll_one_and_eight_devices_preserves_absent_fields_and_evidence(self):
-        for count in (1, 8):
+    def test_enroll_one_eight_17_and_32_devices_preserves_absent_fields_and_evidence(self):
+        for count in (1, 8, 17, 32):
             self.profile['devices'] = [self.device(index) for index in range(count)]
             self.ops.config = self.profile
             self.profile['devices'][-1]['architecture'] = 'ada'
@@ -240,6 +240,12 @@ class BootstrapTests(unittest.TestCase):
             source = self.root / config['sources'][0]['path'].lstrip('/')
             self.assertEqual((source / 'Makefile').read_bytes(), b'REVIEWED build source with P2P changes')
             self.assertTrue(config['sources'][0]['p2p_preferred'])
+
+    def test_33_selected_devices_are_rejected_before_enrollment(self):
+        self.profile['devices'] = [self.device(index) for index in range(33)]
+        with self.assertRaisesRegex(BootstrapError, 'one through 32'):
+            self.worker.enroll(self.profile)
+        self.assertFalse((self.root / CONFIG.lstrip('/')).exists())
 
     def test_source_changed_during_snapshot_rejected_before_config_publication(self):
         original = self.worker._snapshot

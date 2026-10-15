@@ -1,5 +1,65 @@
 """Reviewed C payloads. Loader derived from NVIDIA open modules 615.71.09 (MIT)."""
 
+# The capacity placeholder is filled from the shared Python limits module.
+REGISTRY_STRING_PARAMETERS = r'''/* Keep registry strings within one sysfs page, including newline and NUL.
+ * Only the three aggregate registry parameters use this bounded registration.
+ * Omitted parameters retain NULL; explicit empty values own an empty buffer.
+ */
+#define NV_VBIOS_REGISTRY_STRING_MAX_BYTES @REGISTRY_STRING_MAX_BYTES@
+
+struct nv_vbios_registry_string_parameter
+{
+    char **value;
+    char storage[NV_VBIOS_REGISTRY_STRING_MAX_BYTES + 1];
+};
+
+static int
+nv_vbios_registry_string_set(const char *value, const struct kernel_param *kp)
+{
+    struct nv_vbios_registry_string_parameter *parameter = kp->arg;
+    size_t length;
+
+    if (value == NULL)
+        return -EINVAL;
+    length = strnlen(value, sizeof(parameter->storage));
+    if (length == sizeof(parameter->storage))
+        return -ENOSPC;
+
+    /* Validate before changing either the previous value or its storage. */
+    memcpy(parameter->storage, value, length + 1);
+    *parameter->value = parameter->storage;
+    return 0;
+}
+
+static int
+nv_vbios_registry_string_get(char *buffer, const struct kernel_param *kp)
+{
+    const struct nv_vbios_registry_string_parameter *parameter = kp->arg;
+
+    return scnprintf(buffer, PAGE_SIZE, "%s\n", *parameter->value);
+}
+
+static const struct kernel_param_ops nv_vbios_registry_string_ops = {
+    .set = nv_vbios_registry_string_set,
+    .get = nv_vbios_registry_string_get,
+    /* Storage belongs to the module; no allocation or free callback. */
+};
+
+/* Expand registry aliases before token-pasting the private storage name. */
+#define NV_DEFINE_VBIOS_REG_STRING_ENTRY(regkey, default_value) \
+    NV_DEFINE_VBIOS_STRING_PARAMETER(__NV_REG_VAR(regkey), default_value)
+#define NV_DEFINE_VBIOS_STRING_PARAMETER(name, default_value) \
+    NV_DEFINE_VBIOS_STRING_PARAMETER_EXPANDED(name, default_value)
+#define NV_DEFINE_VBIOS_STRING_PARAMETER_EXPANDED(name, default_value) \
+    char *name = (default_value); \
+    static struct nv_vbios_registry_string_parameter nv_vbios_string_##name = { \
+        .value = &name, \
+    }; \
+    module_param_cb(name, &nv_vbios_registry_string_ops, \
+                    &nv_vbios_string_##name, 0444); \
+    __MODULE_PARM_TYPE(name, "charp")
+'''
+
 PARSER_HEADER = r'''/* SPDX-License-Identifier: MIT */
 #ifndef VBIOS_OVERRIDE_IMAGE_H
 #define VBIOS_OVERRIDE_IMAGE_H

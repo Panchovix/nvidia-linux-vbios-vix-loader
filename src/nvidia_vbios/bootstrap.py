@@ -4,6 +4,7 @@ Installation, enrollment, current-kernel reconciliation, and trigger activation
 are separate operations. Alternate filesystem roots require injected operations.
 """
 from __future__ import annotations
+from .limits import MAX_GPUS
 
 import argparse
 import contextlib
@@ -538,8 +539,8 @@ class Bootstrap:
         profile = _input(profile)
         if self.ops.triggers_any_active():
             raise BootstrapError('disable every enabled/active trigger and wait for reconciliation before replacing enrollment')
-        if not isinstance(profile.get('devices'), list) or not 1 <= len(profile['devices']) <= 8:
-            raise BootstrapError('explicit profile requires one through eight GPUs')
+        if not isinstance(profile.get('devices'), list) or not 1 <= len(profile['devices']) <= MAX_GPUS:
+            raise BootstrapError(f'explicit profile requires one through {MAX_GPUS} GPUs')
         if any(not isinstance(device, dict) for device in profile['devices']):
             raise BootstrapError('each selected device must be a JSON object')
         if not isinstance(profile.get('driver_sources'), list) or any(not isinstance(source, dict) or not isinstance(source.get('path'), str) for source in profile['driver_sources']):

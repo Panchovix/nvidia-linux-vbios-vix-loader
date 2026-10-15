@@ -51,6 +51,22 @@ class RuntimeStatusTests(unittest.TestCase):
         self.assertEqual(before, self.fixture.snapshot())
         self.assertEqual(events, self.fixture.ops.events)
 
+    def test_32_gpu_loaded_values_are_compared_fully_including_last_assignment(self):
+        self.fixture.profile['devices'] = [self.fixture.device(index) for index in range(32)]
+        self.fixture.ops.config = self.fixture.profile
+        self.fixture.enroll()
+        self.prepared = self.fixture.ready()
+        config = self.fixture.ops.config
+        self.parameters = typed_parameters(config['devices'], self.prepared['driver'])
+        self.loaded()
+        name = 'NVreg_RegistryBinaryFilePerDevice'
+        self.assertGreater(len(self.parameters[name]), 1024)
+        runtime = self.worker.status()['runtime']
+        self.assertTrue(runtime['activation_matches'])
+        self.assertEqual(runtime['module_parameters'][name]['observed'], self.parameters[name])
+        atomic_write(self.module / 'parameters' / name, self.parameters[name][:-1].encode() + b'\n')
+        self.assertFalse(self.worker.status()['runtime']['module_parameters'][name]['matches'])
+
     def test_stock_module_and_null_registry_values_do_not_change_prepared_ready(self):
         self.loaded(srcversion='DIFFERENT-STOCK-SRCVERSION')
         for name in self.parameters:

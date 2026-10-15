@@ -453,7 +453,7 @@ class SystemOperations:
 
     def modinfo(self, path):
         return {field: self._text(["modinfo", "-F", field, path]) for field in
-                ("version", "vermagic", "srcversion", "vbios_override_per_gpu", "signer")}
+                ("version", "vermagic", "srcversion", "vbios_override_per_gpu", "vbios_override_param_bytes", "signer")}
 
     def sign(self, modules, kernel, config):
         state = self._text(["mokutil", "--sb-state"]).lower()

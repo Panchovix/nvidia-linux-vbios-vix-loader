@@ -1,5 +1,6 @@
 """Root-owned enrollment and exact driver/source selection."""
 from __future__ import annotations
+from ..limits import MAX_GPUS
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -27,8 +28,8 @@ def load_config(path: Path, root: Path = Path("/"), *, require_enabled: bool = T
         if value["schema_version"] != 1 or not isinstance(value["enabled"], bool) or (require_enabled and not value["enabled"]):
             raise LifecycleError("lifecycle is disabled or has unsupported configuration")
         devices = value["devices"]
-        if not isinstance(devices, list) or not 1 <= len(devices) <= 8:
-            raise LifecycleError("explicit selection of one through eight GPUs is required")
+        if not isinstance(devices, list) or not 1 <= len(devices) <= MAX_GPUS:
+            raise LifecycleError(f"explicit selection of one through {MAX_GPUS} GPUs is required")
         seen_bdf, seen_uuid = set(), set()
         for device in devices:
             bdf, uuid = device["bdf"], device["uuid"]

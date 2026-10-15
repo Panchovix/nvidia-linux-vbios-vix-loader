@@ -227,7 +227,7 @@ class PortableReconciler(Reconciler):
         activation_bytes=modprobe_configuration(config.devices,version,config.raw.get('parameters'))
         normal=self.boot.fallback_record(entry)
         base_sha=digest(json.dumps(normal,sort_keys=True).encode())
-        generation=digest(('portable-boot-v1:'+kernel+version+config.fingerprint+base_sha).encode())
+        generation=digest((f'portable-boot-v1:activation-v{ACTIVATION_GENERATION}:'+kernel+version+config.fingerprint+base_sha).encode())
         managed_id=f'vbios-{kernel}-{generation[:20]}';artifacts=self.boot.plan(entry,managed_id)
         return {'kernel':kernel,'version':version,'source':source,'source_inspection':inspection,
                 'configuration_sha256':config.fingerprint,'entry':artifacts.entry_id,

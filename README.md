@@ -34,6 +34,21 @@ Ada GSP firmware loads at most 512 KiB, counted from the payload's legacy image.
 the payload with Vix Editor 0.1.5 or newer: `nvbios normalize edited.rom gpu0.bin --representation ada-relocated-v1`.
 Other Ada images that exceed the limit are refused.
 
+## Multiple GPUs
+
+Select **1–32 GPUs**, repeating `--device INDEX PAYLOAD` for each one. Indices are
+resolved to UUID and PCI address during preparation; assignments and full payload
+hashes are checked separately. The configuration is stored in the initramfs,
+without adding every GPU to the kernel command line.
+
+The patched module accepts **4094 bytes per registry parameter**. A typical
+17-GPU configuration uses 1733 bytes for firmware filenames; 32 GPUs use 3263
+bytes. Preserved extra registry settings count toward the same budget. Oversized
+configurations fail before publication. Rebuild through the updated loader: an
+old module with the original 1024-byte limit cannot load the expanded values.
+Support above eight GPUs has offline tests; a 17- or 32-GPU hardware boot has not
+yet been verified.
+
 ## What you need
 
 - A working NVIDIA 615.x driver with the **open** kernel modules; `nvidia-smi` must list your GPUs.
@@ -87,6 +102,23 @@ Run these from a clone of this repository.
 
 5. Reboot. Your normal entry stays in the boot menu. After the reboot, `sudo nvbios system status` compares the
    loaded module and parameters with the prepared ones.
+
+## Updating an existing loader installation
+
+After updating this checkout, replace the installed runtime and rebuild for the
+running kernel using the source for your **currently installed** NVIDIA driver:
+
+```sh
+sudo nvbios system pre-install
+sudo nvbios system install --repository "$PWD"
+sudo nvbios system post-install --source /path/to/current-open-kernel-modules
+```
+
+Keep `--p2p-preferred` on `post-install` if your existing profile requires a P2P
+source. This sequence updates the loader and builds a new boot image; it does not
+reinstall NVIDIA userspace or reload active GPU modules. Wait for `post-install`
+to complete, then reboot. An older installed runtime or module does not gain the
+expanded GPU count merely by downloading this repository.
 
 ## Kernel and driver updates
 

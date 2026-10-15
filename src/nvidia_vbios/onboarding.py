@@ -4,6 +4,7 @@ Preparing a profile never enrolls it, installs files, builds modules, changes bo
 selection, or writes GPU state. Bootstrap.enroll remains the enrollment authority.
 """
 from __future__ import annotations
+from .limits import MAX_GPUS
 
 import argparse
 import csv
@@ -198,8 +199,8 @@ class Onboarding:
             raise BootstrapError('portable boot options require an explicit portable backend')
         if bool(signing_key) != bool(signing_certificate):
             raise BootstrapError('module signing requires both key and certificate')
-        if not 1 <= len(devices) <= 8:
-            raise BootstrapError('select one through eight GPUs with --device SELECTOR ROM')
+        if not 1 <= len(devices) <= MAX_GPUS:
+            raise BootstrapError(f'select one through {MAX_GPUS} GPUs with --device SELECTOR ROM')
         if type(jobs) is not int or not 1 <= jobs <= 256:
             raise BootstrapError('jobs must be between 1 and 256')
         destination = _input_path(output)

@@ -34,6 +34,21 @@ El firmware GSP de Ada carga como máximo 512 KiB, contados desde la imagen lega
 exporta el payload con Vix Editor 0.1.5 o superior: `nvbios normalize editada.rom gpu0.bin --representation ada-relocated-v1`.
 Otras imágenes Ada que superen el límite se rechazan.
 
+## Varias GPUs
+
+Selecciona **de 1 a 32 GPUs**, repitiendo `--device INDICE PAYLOAD` para cada una.
+Durante la preparación, los índices se resuelven a UUID y dirección PCI; las
+asignaciones y los hashes completos se verifican individualmente. La configuración
+queda dentro del initramfs, sin añadir cada GPU a la línea de comandos del kernel.
+
+El módulo parcheado admite **4094 bytes por parámetro de registro**. Una configuración
+típica de 17 GPUs ocupa 1733 bytes para los nombres de firmware; con 32 GPUs, 3263
+bytes. Los ajustes de registro adicionales conservados cuentan dentro del mismo
+límite. Si se excede, se rechaza la configuración antes de publicarla. Es necesario
+recompilar mediante el loader actualizado: el módulo antiguo, limitado a 1024
+bytes, no admite los valores ampliados. Hay pruebas offline para más de ocho GPUs;
+todavía no se ha verificado un arranque real con 17 o 32 GPUs.
+
 ## Qué necesitas
 
 - Un driver NVIDIA 615.x funcionando con los módulos **abiertos**; `nvidia-smi` debe listar tus GPUs.
@@ -88,6 +103,24 @@ Ejecuta esto desde un clon de este repositorio.
 
 5. Reinicia. Tu entrada normal sigue en el menú de arranque. Tras reiniciar, `sudo nvbios system status`
    compara el módulo y los parámetros cargados con los preparados.
+
+## Actualizar una instalación existente del loader
+
+Después de actualizar este checkout, reemplaza el runtime instalado y recompila
+para el kernel en ejecución usando las fuentes del driver NVIDIA **actualmente
+instalado**:
+
+```sh
+sudo nvbios system pre-install
+sudo nvbios system install --repository "$PWD"
+sudo nvbios system post-install --source /ruta/a/las/fuentes-actuales
+```
+
+Conserva `--p2p-preferred` en `post-install` si tu perfil existente exige fuentes
+P2P. Esta secuencia actualiza el loader y prepara una imagen de arranque nueva;
+no reinstala las bibliotecas NVIDIA ni recarga los módulos activos. Espera a que
+termine `post-install` y luego reinicia. Descargar el repositorio por sí solo no
+amplía el límite del runtime o módulo que ya tenías instalado.
 
 ## Actualizaciones del kernel y del driver
 

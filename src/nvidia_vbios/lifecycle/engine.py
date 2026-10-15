@@ -8,6 +8,7 @@ import re
 import shutil
 import tempfile
 import time
+from ..limits import REGISTRY_STRING_MAX_BYTES
 from .config import load_config, select_source
 from .security import LifecycleError, atomic_write, checked_path, digest, hash_file, json_write, locked, token, exchange_directory
 
@@ -17,8 +18,8 @@ MODULES = ("nvidia.ko", "nvidia-modeset.ko", "nvidia-drm.ko", "nvidia-uvm.ko")
 ACTIVATION_PATH = "etc/modprobe.d/zz-vbios-override-test.conf"
 FORCE_PATH = "etc/cmdline.d/20-force_drivers.conf"
 FORCE_BYTES = b"rd.driver.pre=nvidia\n"
-MODULE_STRING_MAX_BYTES = 1024
-ACTIVATION_GENERATION = 3
+MODULE_STRING_MAX_BYTES = REGISTRY_STRING_MAX_BYTES
+ACTIVATION_GENERATION = 4
 
 
 def firmware_filename(device):
@@ -27,12 +28,12 @@ def firmware_filename(device):
 
 
 def _validate_parameter_lengths(parameters):
-    # Linux param_set_charp() accepts 1024 bytes, excluding the terminating NUL,
-    # and rejects 1025. Check decoded values, not kmod quoting or option names.
+    # The patched driver accepts bounded strings; leave room for sysfs newline
+    # and NUL in a 4 KiB readback. Check decoded values, not kmod quoting.
     for name, value in parameters.items():
         size = len(value.encode("utf-8"))
         if size > MODULE_STRING_MAX_BYTES:
-            raise LifecycleError(f"{name} is {size} bytes; Linux string parameter limit is {MODULE_STRING_MAX_BYTES} bytes")
+            raise LifecycleError(f"{name} is {size} bytes; driver registry string parameter limit is {MODULE_STRING_MAX_BYTES} bytes")
 
 
 def activation(devices, version, current=None):
@@ -426,6 +427,7 @@ class Reconciler:
                 raise LifecycleError("ready deployment artifact changed")
         for name in status["module_metadata"]:
             expected = self.path(f"/usr/lib/modules/{kernel}/updates/vbios-override/{name}")
+            self._check_module(expected, plan["version"], kernel, primary=name == "nvidia.ko")
             if Path(self.ops.selected_module(kernel, name.removesuffix(".ko"))).resolve() != expected.resolve():
                 raise LifecycleError("ready deployment lost depmod selection")
         return status
@@ -538,8 +540,10 @@ class Reconciler:
         details = self.ops.modinfo(path)
         if details.get("version") != version or details.get("vermagic", "").split()[:1] != [kernel]:
             raise LifecycleError(f"module version/vermagic mismatch: {path.name}")
-        if primary and (details.get("vbios_override_per_gpu") != "1" or not details.get("srcversion")):
-            raise LifecycleError("nvidia.ko is missing the per-GPU patch marker/srcversion")
+        if primary and (details.get("vbios_override_per_gpu") != "1"
+                        or details.get("vbios_override_param_bytes") != str(REGISTRY_STRING_MAX_BYTES)
+                        or not details.get("srcversion")):
+            raise LifecycleError("nvidia.ko is missing the per-GPU/string-capacity patch markers/srcversion")
         if signed and not details.get("signer"):
             raise LifecycleError("Secure Boot requires every installed module to be signed")
         return details
@@ -867,6 +871,8 @@ class Reconciler:
                             and hash_file(self.path(record["path"])) == record["after_sha256"]
                             for record in existing["deployment"])):
                     for name in existing["module_metadata"]:
+                        expected = self.path(f"/usr/lib/modules/{kernel}/updates/vbios-override/{name}")
+                        self._check_module(expected, plan["version"], kernel, primary=name == "nvidia.ko")
                         chosen = Path(self.ops.selected_module(kernel, name.removesuffix(".ko")))
                         if chosen.resolve() != self.path(f"/usr/lib/modules/{kernel}/updates/vbios-override/{name}").resolve():
                             raise LifecycleError("a later module installer changed depmod selection")
@@ -886,6 +892,7 @@ class Reconciler:
                 manifest = self.ops.prepare_source(source, prepared)
                 if (manifest.get("version") != plan["version"]
                         or manifest.get("module_metadata", {}).get("vbios_override_per_gpu") != "1"
+                        or manifest.get("module_metadata", {}).get("vbios_override_param_bytes") != str(REGISTRY_STRING_MAX_BYTES)
                         or manifest.get("prepared_source") != str(prepared)
                         or manifest.get("prepared_modules") != str(prepared / "kernel-open")
                         or any(manifest.get("source_hashes", {}).get(name) != expected

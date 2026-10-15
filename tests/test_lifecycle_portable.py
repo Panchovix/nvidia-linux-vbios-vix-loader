@@ -135,6 +135,43 @@ class PortableLifecycleTests(unittest.TestCase):
                          'tree_sha256': source_tree_hash(source, self.root), 'p2p_preferred': True}]}
         self.normal_entries = {}
 
+    def test_activation_generation_invalidates_portable_prepared_deployment(self):
+        from unittest.mock import patch
+        from nvidia_vbios.lifecycle import portable
+        self.setup_profile('grub')
+        with patch.object(portable, 'ACTIVATION_GENERATION', 3):
+            old = self.worker.reconcile(self.new)
+        with self.assertRaisesRegex(LifecycleError, 'current profile'):
+            self.worker.ready_status(self.new)
+        new = self.worker.reconcile(self.new)
+        self.assertNotEqual(old['generation_sha256'], new['generation_sha256'])
+        self.assertEqual(old['activation_config_sha256'], new['activation_config_sha256'])
+        self.assertEqual(self.ops.builds, 2)
+
+    def test_32_selected_gpus_use_complete_activation_in_portable_image(self):
+        from nvidia_vbios.lifecycle.engine import firmware_filename
+        self.setup_profile('grub')
+        sample = self.config['devices'][0]
+        devices = []
+        for index in range(32):
+            payload = self.payload + str(index).encode()
+            path = f'/var/lib/nvidia-vbios/roms/board-{index}.bin'
+            self.write(path, payload)
+            devices.append(dict(sample, bdf=f'0000:{index+3:02x}:00.0',
+                uuid=f'GPU-00000000-0000-0000-0000-{index+1:012x}',
+                payload_path=path, sha256=digest(payload), source_sha256=digest(payload), size=len(payload)))
+        self.config['devices'] = devices
+        self.write_config()
+        ready = self.worker.reconcile(self.new)
+        expected = modprobe_configuration(devices, VERSION)
+        self.assertGreater(len(ready['module_parameters']['NVreg_RegistryBinaryFilePerDevice']), 1024)
+        roles = self.fleet()['boot_generations'][ready['entry']]['roles']
+        image = self.root / next(name for name, role in roles.items() if role == 'initramfs').lstrip('/')
+        self.assertEqual(self.ops.portable_extract(image, [initramfs.ACTIVATION_PATH])[initramfs.ACTIVATION_PATH], expected)
+        for device in devices:
+            member = f'usr/lib/firmware/nvidia/{VERSION}/vbios-override/{firmware_filename(device)}'
+            self.assertEqual(digest(self.ops.portable_extract(image, [member])[member]), device['sha256'])
+
     def write(self, name, data):
         path = self.root / name.lstrip('/')
         atomic_write(path, data)

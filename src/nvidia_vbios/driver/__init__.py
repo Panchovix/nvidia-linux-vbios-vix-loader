@@ -15,11 +15,15 @@ import re
 import shutil
 import tempfile
 
-from ._payload import CACHED_ARGUMENTS_ABI, HELPERS, LOADER_FUNCTIONS, LOADER_LICENSE, PARSER_HEADER
+from ..limits import REGISTRY_STRING_MAX_BYTES
+from ._payload import (CACHED_ARGUMENTS_ABI, HELPERS, LOADER_FUNCTIONS, LOADER_LICENSE,
+                       PARSER_HEADER, REGISTRY_STRING_PARAMETERS)
 
 __all__ = ["DriverPatchError", "inspect_source", "prepare_source", "apply_to_tree"]
 
 SCHEMA_VERSION = 1
+MODULE_METADATA = {"vbios_override_per_gpu": "1",
+                   "vbios_override_param_bytes": str(REGISTRY_STRING_MAX_BYTES)}
 WORKING_COPY_MARKER = ".nvidia-vbios-working-copy.json"
 MANIFEST_NAME = ".nvidia-vbios-manifest.json"
 GSP = "src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c"
@@ -195,6 +199,31 @@ def _validate_loader(contents: dict[str, str]) -> None:
             raise DriverPatchError(f'binary writer missing anchor: {check}')
 
 
+def _patch_registry_parameters(contents: dict[str, str]) -> None:
+    """Replace only aggregate registry charp registrations, preserving parsers."""
+    for key in ('__NV_REGISTRY_DWORDS', '__NV_REGISTRY_DWORDS_PER_DEVICE',
+                '__NV_REGISTRY_BINARY_FILE_PER_DEVICE'):
+        contents[REG_H] = _once(contents[REG_H],
+            f'NV_DEFINE_REG_STRING_ENTRY({key}, NULL);',
+            f'NV_DEFINE_VBIOS_REG_STRING_ENTRY({key}, NULL);', f'{key} parameter')
+    payload = REGISTRY_STRING_PARAMETERS.replace(
+        '@REGISTRY_STRING_MAX_BYTES@', str(REGISTRY_STRING_MAX_BYTES))
+    contents[OS_REG] = _once(contents[OS_REG], '#include "nv-reg.h"\n',
+        payload + '\n#include "nv-reg.h"\n', 'bounded registry parameter helpers')
+
+
+def _prepared_module_metadata(contents: dict[str, str]) -> dict[str, str]:
+    """Read actual markers so verified legacy manifests never claim new limits."""
+    metadata = {}
+    for key in MODULE_METADATA:
+        values = re.findall(r'MODULE_INFO\(\s*' + re.escape(key) + r'\s*,\s*"([^"\n]+)"\s*\);', contents[NV])
+        if len(values) > 1:
+            raise DriverPatchError(f'ambiguous module metadata: {key}')
+        if values:
+            metadata[key] = values[0]
+    return metadata
+
+
 def _expect_signature(text: str, name: str, parameters: str) -> None:
     start, end = _function_span(text, name)
     opening = text.index('{', start, end)
@@ -225,6 +254,7 @@ def _plan(contents: dict[str, str]) -> dict[str, str]:
     if not _native_loader(planned):
         _backport_loader(planned)
     _validate_loader(planned)
+    _patch_registry_parameters(planned)
     if 'rm_write_registry_binary' not in planned['kernel-open/common/inc/nv.h']:
         raise DriverPatchError('binary registry write API unavailable')
     planned[GSP_HEADER] = _once(planned[GSP_HEADER], '    NvP64 pGspArgumentsMappingPriv;\n',
@@ -268,7 +298,8 @@ def _plan(contents: dict[str, str]) -> dict[str, str]:
             '    while ((pRegEntry != NULL) && (pRegEntry->regParmStr != NULL))\n    {\n' + skip, function))
     planned[REGISTRY] = reg
     planned[NV] = _once(planned[NV], 'MODULE_VERSION(NV_VERSION_STRING);\n',
-        'MODULE_VERSION(NV_VERSION_STRING);\nMODULE_INFO(vbios_override_per_gpu, "1");\n', 'module metadata')
+        'MODULE_VERSION(NV_VERSION_STRING);\n' + ''.join(
+            f'MODULE_INFO({key}, "{value}");\n' for key, value in MODULE_METADATA.items()), 'module metadata')
     planned[PARSER] = PARSER_HEADER
     return {name: text for name, text in planned.items() if name not in contents or text != contents[name]}
 
@@ -312,10 +343,17 @@ def inspect_source(path) -> dict:
             'binary_loader_backport_needed': not native,
             'gsp_vbios_override_abi': _abi_valid(contents[ARGS]),
             'common_boot_argument_lifecycle': 'kgspAllocBootArgsCommon' in contents[GSP] and 'kgspFreeBootArgsCommon' in contents[GSP],
-            'explicit_chip_scope': list(CHIPS), 'module_metadata': {'vbios_override_per_gpu': '1'}}
+            'explicit_chip_scope': list(CHIPS), 'module_metadata': dict(MODULE_METADATA),
+            'registry_string_max_bytes': REGISTRY_STRING_MAX_BYTES}
         applied = _applied_report(tree)
         if applied:
             result['capabilities']['already_patched'] = True
+            metadata = _prepared_module_metadata(contents)
+            result['capabilities']['module_metadata'] = metadata
+            capacity = metadata.get('vbios_override_param_bytes', '1024')
+            if not capacity.isdecimal():
+                raise DriverPatchError('invalid prepared module registry parameter capacity')
+            result['capabilities']['registry_string_max_bytes'] = int(capacity)
         else:
             for name, text in contents.items():
                 if any(marker in text for marker in ('_kgspVbiosOverride', 'pVbiosOverrideDescriptor', 'vbios_override_per_gpu', 'kgspVbiosOverrideStage')):
@@ -372,6 +410,10 @@ def _apply_to_tree_locked(tree, *, dry_run: bool = False) -> dict:
         raise DriverPatchError('; '.join(info['reasons']))
     existing = _applied_report(tree)
     if existing:
+        if info['capabilities']['module_metadata'] != MODULE_METADATA:
+            raise DriverPatchError(
+                'prepared source uses a legacy registry parameter capacity; '
+                'prepare a fresh copy from the unpatched original source and rebuild')
         return dict(existing, status='already_applied', dry_run=dry_run, changed_files=[])
     contents = _read_required(tree)
     planned = _plan(contents)
@@ -386,7 +428,7 @@ def _apply_to_tree_locked(tree, *, dry_run: bool = False) -> dict:
               'version': info['version'], 'capabilities': info['capabilities'],
               'source_hashes': marker['source_hashes'],
               'patched_hashes': {**info['source_hashes'], **{name: _hash(text.encode()) for name, text in planned.items()}},
-              'changed_files': sorted(planned), 'module_metadata': {'vbios_override_per_gpu': '1'},
+              'changed_files': sorted(planned), 'module_metadata': dict(MODULE_METADATA),
               'prepared_modules': str(tree / 'kernel-open'), 'manifest_path': str(tree / MANIFEST_NAME)}
     if dry_run:
         return report

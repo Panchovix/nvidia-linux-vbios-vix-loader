@@ -51,7 +51,7 @@ class FakeOperations:
         shutil.copytree(source, destination)
         return {"version": (source / "version.mk").read_text().strip(),
                 "prepared_source": str(destination), "prepared_modules": str(destination / "kernel-open"),
-                "module_metadata": {"vbios_override_per_gpu": "1"},
+                "module_metadata": {"vbios_override_per_gpu": "1", "vbios_override_param_bytes": "4094"},
                 "source_hashes": self.inspect_source(source)["source_hashes"]}
 
     def inventory(self):
@@ -78,9 +78,9 @@ class FakeOperations:
         modules.mkdir(exist_ok=True)
         for name in MODULES:
             metadata = {"version": self.version, "vermagic": kernel + " SMP preempt mod_unload",
-                        "srcversion": "A1B2C3", "vbios_override_per_gpu": "1", "signer": "",
+                        "srcversion": "A1B2C3", "vbios_override_per_gpu": "1", "vbios_override_param_bytes": "4094", "signer": "",
                         "name": name, "build_generation": self.builds}
-            if self.fault in ("version", "vermagic", "vbios_override_per_gpu") and name == "nvidia.ko":
+            if self.fault in ("version", "vermagic", "vbios_override_per_gpu", "vbios_override_param_bytes") and name == "nvidia.ko":
                 metadata[self.fault] = "wrong"
             atomic_write(modules / name, json.dumps(metadata).encode())
         if self.after_build:
@@ -239,7 +239,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(self.ops.builds, 1)
 
     def test_build_and_install_failure_matrix_restores_bytes_and_default(self):
-        for fault in ("akmods", "build", "version", "vermagic", "vbios_override_per_gpu", "depmod",
+        for fault in ("akmods", "build", "version", "vermagic", "vbios_override_per_gpu", "vbios_override_param_bytes", "depmod",
                       "selection", "dracut", "extract", "labels", "default"):
             with self.subTest(fault=fault):
                 # Each scenario starts from its own synthetic root.
@@ -313,20 +313,20 @@ class LifecycleTests(unittest.TestCase):
             self.worker.reconcile(NEW)
         self.assertFalse(list((self.root / f"usr/lib/modules/{NEW}").rglob("*.ko")))
 
-    def test_up_to_eight_gpu_selection_is_explicit_and_scoped(self):
+    def test_up_to_32_gpu_selection_is_explicit_and_scoped(self):
         sample = self.config["devices"][0]
         self.config["devices"] = [dict(sample, bdf=f"0000:{i+3:02x}:00.0",
-            uuid=f"GPU-00000000-0000-0000-0000-{i+1:012x}") for i in range(8)]
+            uuid=f"GPU-00000000-0000-0000-0000-{i+1:012x}") for i in range(32)]
         self.write_config()
         result = self.worker.reconcile(NEW)
         image_path = next(record["path"] for record in result["deployment"] if record["path"].startswith("/boot/initramfs-"))
         configuration = self.ops.extract(self.root / image_path.lstrip("/"), "etc/modprobe.d/zz-vbios-override-test.conf").decode()
         for device in self.config["devices"]:
             self.assertIn("pci=" + device["bdf"], configuration)
-        self.assertNotIn("pci=0000:0b:00.0", configuration)
-        self.config["devices"].append(dict(sample, bdf="0000:0b:00.0", uuid="GPU-00000000-0000-0000-0000-000000000009"))
+        self.assertNotIn("pci=0000:23:00.0", configuration)
+        self.config["devices"].append(dict(sample, bdf="0000:23:00.0", uuid="GPU-00000000-0000-0000-0000-000000000033"))
         self.write_config()
-        with self.assertRaisesRegex(LifecycleError, "one through eight"):
+        with self.assertRaisesRegex(LifecycleError, "one through 32"):
             self.worker.reconcile(NEW)
 
     def test_hopper_datacenter_and_unvalidated_enrollment_are_excluded(self):
@@ -881,7 +881,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(self.worker.ready_status(NEW)["state"], "ready")
         self.assertEqual(self.ops.builds, 1)
 
-    def test_each_typed_string_accepts_1024_and_rejects_1025_including_preserved_extras(self):
+    def test_each_typed_string_accepts_4094_and_rejects_4095_including_preserved_extras(self):
         from nvidia_vbios.lifecycle.engine import typed_parameters
         prefixes = {"NVreg_RegistryDwords": "Extra=",
                     "NVreg_RegistryDwordsPerDevice": "pci=0000:04:00.0;Extra=",
@@ -889,16 +889,16 @@ class LifecycleTests(unittest.TestCase):
         for name, prefix in prefixes.items():
             with self.subTest(parameter=name):
                 base = typed_parameters(self.config["devices"], VERSION, {name: prefix + "x"})[name]
-                count = 1024 - len(base.encode("utf-8")) + 1
+                count = 4094 - len(base.encode("utf-8")) + 1
                 preserved = {name: prefix + "x" * count}
                 actual = typed_parameters(self.config["devices"], VERSION, preserved)
-                self.assertEqual(len(actual[name].encode("utf-8")), 1024)
+                self.assertEqual(len(actual[name].encode("utf-8")), 4094)
                 preserved[name] += "x"
-                with self.assertRaisesRegex(LifecycleError, name + ".*1025.*1024"):
+                with self.assertRaisesRegex(LifecycleError, name + ".*4095.*4094"):
                     typed_parameters(self.config["devices"], VERSION, preserved)
                 self.config["parameters"] = preserved
                 self.write_config()
-                with self.assertRaisesRegex(LifecycleError, name + ".*1025.*1024"):
+                with self.assertRaisesRegex(LifecycleError, name + ".*4095.*4094"):
                     self.worker.reconcile(NEW)
                 self.assertEqual(self.ops.builds, 0)
                 self.assertFalse(list((self.root / "usr/lib/modules").rglob("*.ko")))
@@ -906,9 +906,9 @@ class LifecycleTests(unittest.TestCase):
 
     def test_parameter_limit_measures_bytes_not_unicode_codepoints(self):
         from nvidia_vbios.lifecycle.engine import _validate_parameter_lengths
-        _validate_parameter_lengths({"Example": "é" * 512})
-        with self.assertRaisesRegex(LifecycleError, "1025.*1024"):
-            _validate_parameter_lengths({"Example": "é" * 512 + "x"})
+        _validate_parameter_lengths({"Example": "é" * 2047})
+        with self.assertRaisesRegex(LifecycleError, "4095.*4094"):
+            _validate_parameter_lengths({"Example": "é" * 2047 + "x"})
 
     def test_eight_gpu_short_paths_fit_and_full_hash_integrity_still_applies(self):
         import shlex
@@ -921,7 +921,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(len(expected["NVreg_RegistryBinaryFilePerDevice"].encode()), 815)
         self.assertTrue(all(len(value.encode()) <= 1024 for value in expected.values()))
         ready = self.worker.reconcile(NEW)
-        self.assertEqual(ready["activation_generation"], 3)
+        self.assertEqual(ready["activation_generation"], 4)
         self.assertEqual(ready["module_parameters"], expected)
         image_name = next(record["path"] for record in ready["deployment"] if record["path"].startswith("/boot/initramfs-"))
         image = self.root / image_name.lstrip("/")
@@ -957,10 +957,82 @@ class LifecycleTests(unittest.TestCase):
         new = self.worker.reconcile(NEW)
         self.assertEqual(self.ops.builds, 2)
         self.assertNotEqual(new["entry"], old["entry"])
-        self.assertEqual(new["activation_generation"], 3)
+        self.assertEqual(new["activation_generation"], 4)
         for name, data in previous.items():
             self.assertEqual((self.root / name.lstrip("/")).read_bytes(), data)
         self.assertTrue(any(record["path"].endswith("/" + short_name(self.config["devices"][0])) for record in new["deployment"]))
+
+    def test_17_and_32_distinct_payload_assignments_survive_long_activation(self):
+        from nvidia_vbios.lifecycle.engine import typed_parameters, firmware_filename, ACTIVATION_PATH
+        import shlex
+        sample = self.config["devices"][0]
+        for count in (17, 32):
+            with self.subTest(count=count):
+                devices = []
+                for index in range(count):
+                    payload = b"REVIEWED ROM unique board " + str(index).encode()
+                    path = f"/var/lib/nvidia-vbios/roms/board-{index}.bin"
+                    atomic_write(self.root / path.lstrip("/"), payload)
+                    devices.append(dict(sample, bdf=f"0000:{index+3:02x}:00.0",
+                        uuid=f"GPU-00000000-0000-0000-0000-{index+1:012x}",
+                        payload_path=path, sha256=digest(payload), source_sha256=digest(payload), size=len(payload)))
+                self.config["devices"] = devices
+                self.write_config()
+                expected = typed_parameters(devices, VERSION)
+                self.assertGreater(len(expected["NVreg_RegistryBinaryFilePerDevice"]), 1024)
+                ready = self.worker.reconcile(NEW)
+                image_record = next(r for r in ready["deployment"] if r["path"].startswith("/boot/initramfs-"))
+                image = self.root / image_record["path"].lstrip("/")
+                line = self.ops.extract(image, ACTIVATION_PATH).decode().splitlines()[1]
+                self.assertEqual(dict(word.split("=", 1) for word in shlex.split(line)[2:]), expected)
+                self.assertEqual(ready["module_parameters"], expected)
+                for device in devices:
+                    member = f"usr/lib/firmware/nvidia/{VERSION}/vbios-override/{firmware_filename(device)}"
+                    self.assertEqual(digest(self.ops.extract(image, member)), device["sha256"])
+                self.assertNotIn(b"NVreg_Registry", self.bls(NEW).read_bytes())
+
+    def test_old_capacity_marker_is_refused_before_publication(self):
+        from unittest.mock import patch
+        prepare = self.ops.prepare_source
+        def old_manifest(*args):
+            result = prepare(*args)
+            result["module_metadata"].pop("vbios_override_param_bytes")
+            return result
+        with patch.object(self.ops, "prepare_source", old_manifest):
+            with self.assertRaisesRegex(LifecycleError, "manifest"):
+                self.worker.reconcile(NEW)
+        self.assertEqual(self.ops.builds, 0)
+        self.ops.fault = "vbios_override_param_bytes"
+        with self.assertRaisesRegex(LifecycleError, "string-capacity"):
+            self.worker.reconcile(NEW)
+        self.assertFalse(list((self.root / "boot/loader/entries").glob("vbios-*")))
+
+    def test_old_capacity_module_is_refused_by_ready_and_reuse_checks(self):
+        from unittest.mock import patch
+        self.worker.reconcile(NEW)
+        modinfo = self.ops.modinfo
+        def old_module(path):
+            details = modinfo(path)
+            details.pop("vbios_override_param_bytes", None)
+            return details
+        with patch.object(self.ops, "modinfo", old_module):
+            with self.assertRaisesRegex(LifecycleError, "string-capacity"):
+                self.worker.ready_status(NEW)
+            with self.assertRaisesRegex(LifecycleError, "string-capacity"):
+                self.worker.reconcile(NEW)
+        self.assertEqual(self.ops.builds, 1)
+
+    def test_v4_invalidates_v3_with_unchanged_profile_and_activation_bytes(self):
+        from unittest.mock import patch
+        from nvidia_vbios.lifecycle import engine
+        with patch.object(engine, "ACTIVATION_GENERATION", 3):
+            old = self.worker.reconcile(NEW)
+        with self.assertRaisesRegex(LifecycleError, "current profile"):
+            self.worker.ready_status(NEW)
+        new = self.worker.reconcile(NEW)
+        self.assertEqual(new["activation_config_sha256"], old["activation_config_sha256"])
+        self.assertNotEqual(new["generation_sha256"], old["generation_sha256"])
+        self.assertEqual(self.ops.builds, 2)
 
     def test_queue_and_numeric_kernel_selection(self):
         queue_event("add", NEW, self.root)
