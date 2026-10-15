@@ -10,8 +10,8 @@ entry as a fallback.
 Thanks to **@pantsoftime** ([overclock.net](https://www.overclock.net)), whose original `vbios_override` patch
 this project is built on. Without it, none of this would have been possible.
 
-To edit VBIOS files, use a VBIOS editor such as
-[NVIDIA VBIOS Vix Editor](https://github.com/Panchovix/nvidia-vbios-vix-editor). This repository only loads them.
+To modify the VBIOS, use [NVIDIA VBIOS Vix Editor](https://github.com/Panchovix/nvidia-vbios-vix-editor).
+This repository only loads it.
 
 > **Warning.** A modified VBIOS can raise power, clocks and voltages beyond the card's design limits. You can
 > damage hardware. Keep a copy of your original ROM and use this at your own risk.
@@ -20,12 +20,12 @@ To edit VBIOS files, use a VBIOS editor such as
 
 | Platform | State |
 | --- | --- |
-| Fedora 43, GRUB/BLS, dracut, DNF5, NVIDIA 615.x open kernel modules installed with the `.run` installer | **Supported**: used on real hardware with Blackwell and Ada GPUs |
+| Fedora 43, GRUB/BLS, dracut, DNF5, NVIDIA 615.x open kernel modules installed with the `.run` installer | **Supported**: used on real hardware |
 | Fedora with akmods/RPM Fusion drivers, RHEL family, Debian/Ubuntu, Arch/CachyOS/EndeavourOS, systemd-boot, UKI, Secure Boot | **Experimental**: synthetic and container tests only |
 | rpm-ostree, proprietary NVIDIA kernel modules, drivers older than 615 | Not supported |
 
-GPUs: Blackwell GB20x (GeForce RTX 50, RTX PRO Blackwell) is the tested path. Ada payloads larger than
-512 KiB are refused. Ampere is in scope of the checks but has not been tested.
+Tested working on: RTX PRO 6000 Blackwell Max-Q, RTX PRO 6000 Blackwell Workstation Edition, GeForce RTX 5090,
+5080, 5070 Ti, 5070 and 5060 Ti. Ada payloads larger than 512 KiB are refused.
 
 ## What you need
 
