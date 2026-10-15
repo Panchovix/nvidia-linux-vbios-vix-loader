@@ -21,8 +21,11 @@ Este repositorio solo la carga.
 | Plataforma | Estado |
 | --- | --- |
 | Fedora 43, GRUB/BLS, dracut, DNF5, módulos abiertos NVIDIA 615.x instalados con el instalador `.run` | **Soportado**: usado en hardware real |
-| Fedora con drivers de akmods/RPM Fusion, familia RHEL, Debian/Ubuntu, Arch/CachyOS/EndeavourOS, systemd-boot, UKI, Secure Boot | **Experimental**: solo pruebas sintéticas y en contenedores |
-| rpm-ostree, módulos de kernel propietarios de NVIDIA, drivers anteriores a 615 | No soportado |
+| Familia RHEL, Debian/Ubuntu, Arch/CachyOS/EndeavourOS, systemd-boot, UKI, Secure Boot (todos con el driver `.run`) | **Experimental**: solo pruebas sintéticas y en contenedores |
+| Drivers NVIDIA instalados con un gestor de paquetes (RPM Fusion, pacman, apt, ...), rpm-ostree, módulos de kernel propietarios de NVIDIA, drivers anteriores a 615 | No soportado |
+
+**Solo se soportan drivers instalados con el instalador `.run` de NVIDIA.** Una actualización del driver hecha
+por un gestor de paquetes todavía no se maneja de forma segura.
 
 Probado funcionando en: RTX PRO 6000 Blackwell Max-Q, RTX PRO 6000 Blackwell Workstation Edition, GeForce RTX
 5090, 5080, 5070 Ti, 5070 y 5060 Ti. Los payloads de Ada de más de 512 KiB se rechazan.
@@ -50,8 +53,8 @@ Ejecuta esto desde un clon de este repositorio.
    sudo ./nvbios system devices
    ```
 
-2. Prepara un perfil, con un `--device` por GPU. Usa `--userspace manual` si instalaste el driver con `.run`;
-   omítelo con drivers empaquetados. Este paso solo escribe el directorio de salida.
+2. Prepara un perfil, con un `--device` por GPU (`--userspace manual` corresponde al driver instalado con `.run`).
+   Este paso solo escribe el directorio de salida.
 
    ```sh
    sudo ./nvbios system prepare \
@@ -111,8 +114,8 @@ Primero restaura módulos normales:
 
 1. `sudo nvbios system disable`.
 2. Para cada kernel que conserves, instala módulos NVIDIA normales de la misma versión del driver: vuelve a
-   ejecutar el instalador `.run` de NVIDIA para ese kernel (`--kernel-name=KERNEL`), o deja que akmods/DKMS los
-   recompile con drivers empaquetados. Luego reconstruye su initramfs normal con `sudo dracut -f --kver KERNEL`.
+   ejecutar el instalador `.run` de NVIDIA para ese kernel (`--kernel-name=KERNEL`). Luego reconstruye su
+   initramfs normal con `sudo dracut -f --kver KERNEL`.
 3. Mueve temporalmente `/usr/lib/modules/*/updates/vbios-override` a otro lugar (por ejemplo
    `/var/backups/vbios-override`), ejecuta `sudo depmod -a KERNEL` para cada kernel, reinicia en la entrada normal
    y comprueba que `nvidia-smi` funcione.

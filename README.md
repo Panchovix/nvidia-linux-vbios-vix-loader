@@ -21,8 +21,11 @@ This repository only loads it.
 | Platform | State |
 | --- | --- |
 | Fedora 43, GRUB/BLS, dracut, DNF5, NVIDIA 615.x open kernel modules installed with the `.run` installer | **Supported**: used on real hardware |
-| Fedora with akmods/RPM Fusion drivers, RHEL family, Debian/Ubuntu, Arch/CachyOS/EndeavourOS, systemd-boot, UKI, Secure Boot | **Experimental**: synthetic and container tests only |
-| rpm-ostree, proprietary NVIDIA kernel modules, drivers older than 615 | Not supported |
+| RHEL family, Debian/Ubuntu, Arch/CachyOS/EndeavourOS, systemd-boot, UKI, Secure Boot (all with the `.run` driver) | **Experimental**: synthetic and container tests only |
+| NVIDIA drivers installed with a package manager (RPM Fusion, pacman, apt, ...), rpm-ostree, proprietary NVIDIA kernel modules, drivers older than 615 | Not supported |
+
+**Only drivers installed with NVIDIA's `.run` installer are supported.** A driver upgrade done by a package manager
+is not handled safely yet.
 
 Tested working on: RTX PRO 6000 Blackwell Max-Q, RTX PRO 6000 Blackwell Workstation Edition, GeForce RTX 5090,
 5080, 5070 Ti, 5070 and 5060 Ti. Ada payloads larger than 512 KiB are refused.
@@ -49,8 +52,8 @@ Run these from a clone of this repository.
    sudo ./nvbios system devices
    ```
 
-2. Prepare a profile, with one `--device` per GPU. Use `--userspace manual` for a `.run` driver install;
-   leave it out for packaged drivers. This step only writes the output directory.
+2. Prepare a profile, with one `--device` per GPU (`--userspace manual` means the `.run` driver install). This
+   step only writes the output directory.
 
    ```sh
    sudo ./nvbios system prepare \
@@ -108,7 +111,7 @@ kernel modules for that kernel, and the normal boot entry may load them too. Res
 
 1. `sudo nvbios system disable`.
 2. For every kernel you keep, install normal NVIDIA modules of the same driver version: re-run the NVIDIA `.run`
-   installer for that kernel (`--kernel-name=KERNEL`), or let akmods/DKMS rebuild them for packaged drivers. Then
+   installer for that kernel (`--kernel-name=KERNEL`). Then
    rebuild its normal initramfs with `sudo dracut -f --kver KERNEL`.
 3. Temporarily move `/usr/lib/modules/*/updates/vbios-override` aside (for example to `/var/backups/vbios-override`),
    run `sudo depmod -a KERNEL` for each kernel, reboot into the normal entry and check that `nvidia-smi` works.
