@@ -32,3 +32,5 @@ DEALINGS IN THE SOFTWARE.
 
 The PCI device to architecture table in `src/nvidia_vbios/families.py` lists IDs from NVIDIA's public
 [supported GPU table](https://github.com/NVIDIA/open-gpu-kernel-modules/blob/615.71.09/README.md).
+Its `EDITOR_ONLY` entry (10de:2501, from pci.ids) is used by the offline editor only; the loader
+treats it as unknown.

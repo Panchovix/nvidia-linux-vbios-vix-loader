@@ -21,7 +21,7 @@ import tempfile
 from .bootstrap import BootstrapError, BootstrapOperations, _external, _input_path, _platform
 from .lifecycle.engine import parse_bls
 from .lifecycle.security import LifecycleError, digest, token
-from .payload import ADA_MAX_SIZE, PayloadError, check_payload, gsp_bytes, optional_editor
+from .payload import PayloadError, check_loadable_payload, optional_editor
 
 UUID = re.compile(r'GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}')
 BDF = re.compile(r'([0-9a-fA-F]{4}|[0-9a-fA-F]{8}):([0-9a-fA-F]{2}):([01][0-9a-fA-F]\.[0-7])')
@@ -264,13 +264,9 @@ class Onboarding:
             else:
                 # The open loader enrolls an already single-chain payload, checked by the kernel's own rule.
                 try:
-                    family = check_payload(archive, gpu['vendor'], gpu['device'])
+                    family = check_loadable_payload(archive, gpu['vendor'], gpu['device'])
                 except PayloadError as exc:
                     raise BootstrapError(f'{gpu["bdf"]}: {exc}') from None
-                # AD10x GSP firmware accepts at most 512 KiB, counted from the legacy image the driver selects.
-                if family == 'ada' and gsp_bytes(archive, gpu['vendor'], gpu['device']) > ADA_MAX_SIZE:
-                    raise BootstrapError(f'{gpu["bdf"]}: Ada GPUs load at most 512 KiB from the legacy image; this payload '
-                                         'is larger. Export a relocated payload with your VBIOS editor')
                 payload, versions = archive, []
             stem = gpu['bdf'].replace(':', '-').replace('.', '-')
             archive_name, payload_name = f'archives/{stem}.rom', f'payloads/{stem}.bin'

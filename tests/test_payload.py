@@ -55,8 +55,10 @@ class PayloadCheckTests(unittest.TestCase):
         for data in (image[:0x100], image * 4096):
             with self.subTest(size=len(data)), self.assertRaisesRegex(payload.PayloadError, '512 B to 4 MiB'):
                 payload.find_legacy(data, 0x10DE, PRO_6000)
-        with self.assertRaisesRegex(payload.PayloadError, 'outside the supported'):
-            payload.check_payload(legacy_image(0xFFFF), 0x10DE, 0xFFFF)
+        # 0x2501 (RTX 3060 from pci.ids) is recognized by the offline editor only.
+        for device in (0xFFFF, 0x2501):
+            with self.subTest(device=device), self.assertRaisesRegex(payload.PayloadError, 'outside the supported'):
+                payload.check_payload(legacy_image(device), 0x10DE, device)
         with self.assertRaisesRegex(payload.PayloadError, 'only NVIDIA'):
             payload.check_payload(image, 0x1002, PRO_6000)
 
@@ -68,6 +70,36 @@ class PayloadCheckTests(unittest.TestCase):
                 system.SystemOperations.validate_payload(object(), legacy_image(PRO_6000), dict(device, architecture='ada'))
             with self.assertRaisesRegex(LifecycleError, 'exactly one'):
                 system.SystemOperations.validate_payload(object(), legacy_image(PRO_6000) * 2, device)
+
+
+class ReceiverLimitTests(unittest.TestCase):
+    def test_exact_loaded_limit_accepts_prefix_and_rejects_one_extra_byte(self):
+        for device in (0x2204, 0x2414, 0x2484, 0x2503, 0x2582, RTX_2000_ADA):
+            with self.subTest(device=hex(device)):
+                data = bytes(0x9400) + legacy_image(device, blocks=1024)
+                self.assertGreater(len(data), payload.GA10X_MAX_SIZE)
+                self.assertEqual(payload.gsp_bytes(data, 0x10de, device), 524288)
+                family = 'ada' if device == RTX_2000_ADA else 'ampere'
+                self.assertEqual(payload.check_loadable_payload(data, 0x10de, device), family)
+                # Kernel-side structure is valid; the receiver capacity is a separate check.
+                self.assertEqual(payload.check_payload(data + b'\xff', 0x10de, device), family)
+                with self.assertRaisesRegex(payload.PayloadError, '512 KiB.*524289 bytes'):
+                    payload.check_loadable_payload(data + b'\xff', 0x10de, device)
+
+    def test_ga100_and_blackwell_do_not_inherit_the_ga10x_capacity(self):
+        for device, family in ((0x20b0, 'ampere'), (PRO_6000, 'blackwell-gb20x')):
+            with self.subTest(device=hex(device)):
+                self.assertEqual(payload.check_loadable_payload(legacy_image(device, blocks=1025), 0x10de, device), family)
+        with self.assertRaisesRegex(payload.PayloadError, 'outside the supported'):
+            payload.check_loadable_payload(legacy_image(0x2501), 0x10de, 0x2501)
+
+    def test_direct_enrollment_validation_rejects_large_payload_before_optional_parser(self):
+        for device, family in ((0x2204, 'ampere'), (RTX_2000_ADA, 'ada')):
+            with self.subTest(family=family), mock.patch.object(payload, 'optional_editor',
+                    side_effect=AssertionError('oversized payload must be refused before parser lookup')):
+                record = {'vendor': 0x10de, 'device': device, 'architecture': family}
+                with self.assertRaisesRegex(LifecycleError, '512 KiB'):
+                    system.SystemOperations.validate_payload(object(), legacy_image(device, blocks=1025), record)
 
 
 @unittest.skipUnless(shutil.which('cc'), 'C compiler not available')

@@ -99,6 +99,18 @@ class OpenOnboardingTests(unittest.TestCase):
             self.assertFalse(self.output.exists())
         self.assertEqual(payload.check_payload(legacy_image(RTX_2000_ADA), 0x10de, RTX_2000_ADA), 'ada')
 
+    def test_ampere_loaded_size_limit_rejects_before_publication(self):
+        device = 0x2204
+        over = bytes(0x9200) + legacy_image(device, blocks=1024) + b'\xff'
+        with self.assertRaisesRegex(BootstrapError, 'Ampere GA10x.*512 KiB'):
+            self.prepare(over, device)
+        self.assertFalse(self.output.exists())
+        fitting = over[:-1]
+        self.prepare(fitting, device)
+        profile = json.loads((self.output / 'profile.json').read_text())
+        self.assertEqual(profile['devices'][0]['architecture'], 'ampere')
+        self.assertEqual(Path(profile['devices'][0]['payload']).read_bytes(), fitting)
+
     def test_ada_limit_counts_from_the_legacy_image(self):
         # A relocated Ada payload keeps a prefix before its legacy image; only the part from there is loaded.
         relocated = bytes(0x9400) + legacy_image(RTX_2000_ADA, blocks=1020)

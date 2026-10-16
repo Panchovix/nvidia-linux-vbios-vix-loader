@@ -386,11 +386,11 @@ class SystemOperations:
         return result
 
     def validate_payload(self, data, device):
-        # The same acceptance rule as the patched kernel loader, plus the stricter
-        # parser checks when the internal Vix Editor extension is present.
-        from nvidia_vbios.payload import PayloadError, check_payload, optional_editor
+        # Kernel parser and known receiver capacity, plus the stricter parser
+        # checks when the internal Vix Editor extension is present.
+        from nvidia_vbios.payload import PayloadError, check_loadable_payload, optional_editor
         try:
-            family = check_payload(data, device["vendor"], device["device"])
+            family = check_loadable_payload(data, device["vendor"], device["device"])
         except PayloadError as exc:
             raise LifecycleError(f"enrolled override payload: {exc}") from None
         if family != device["architecture"]:

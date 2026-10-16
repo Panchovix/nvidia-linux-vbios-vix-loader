@@ -3,16 +3,18 @@
 The patched driver loads a payload only when it holds exactly one NVIDIA legacy PCI image,
 for this GPU's PCI ID, with a zero checksum (scanned on 512-byte boundaries, at most 4 MiB).
 Checking the same rule before enrollment means an enrolled payload is one the kernel accepts.
+check_loadable_payload additionally enforces known GSP receiver capacities.
 This module does not decode or edit VBIOS tables; editing belongs to a VBIOS editor.
 """
 from __future__ import annotations
 import importlib
 import importlib.util
 import struct
-from .families import architecture
+from .families import GA100_DEVICE_IDS, architecture
 
 MAX_SIZE = 4 * 1024 * 1024
-ADA_MAX_SIZE = 512 * 1024
+GA10X_MAX_SIZE = 512 * 1024
+ADA_MAX_SIZE = GA10X_MAX_SIZE  # Compatibility name: AD10x has the same audited capacity.
 SCOPE = ('ampere', 'ada', 'blackwell-gb20x')
 
 
@@ -66,6 +68,27 @@ def check_payload(data: bytes, vendor: int, device: int) -> str:
     if family not in SCOPE:
         raise PayloadError(f'PCI device {device:04x} is outside the supported Ampere/Ada/GB20x scope')
     find_legacy(data, vendor, device)
+    return family
+
+
+def check_loadable_payload(data: bytes, vendor: int, device: int) -> str:
+    """Kernel parser checks plus the audited GA10x/AD10x GSP receiver capacity.
+
+    The driver sends everything from the selected legacy image to the end of the
+    payload. Prefix bytes are not sent. GA100 uses different, unaudited firmware;
+    no 512 KiB capacity is inferred for it or for Blackwell from this audit.
+    """
+    family = check_payload(data, vendor, device)
+    if family == 'ada' or (family == 'ampere' and device not in GA100_DEVICE_IDS):
+        size = gsp_bytes(data, vendor, device)
+        if size > GA10X_MAX_SIZE:
+            chip = 'Ampere GA10x' if family == 'ampere' else 'Ada AD10x'
+            hint = ('Export an experimental relocated payload for the open-source loader with your VBIOS editor, '
+                    'for example `nvbios normalize edited.rom payload.bin --representation ampere-relocated-v1` '
+                    '(Vix Editor).'
+                    if family == 'ampere' else 'Export a supported relocated payload with your VBIOS editor.')
+            raise PayloadError(f'{chip} GSP accepts at most 512 KiB (524288 bytes) from the legacy image; '
+                               f'this payload sends {size} bytes. {hint}')
     return family
 
 

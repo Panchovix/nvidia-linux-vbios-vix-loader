@@ -49,6 +49,17 @@ with Vix Editor:
   If you try it, please open an issue with the result.
 - The laptop Ada images tested are refused: four do not fit, and the RTX 4090 Laptop image has no UEFI image.
 
+Ampere GA102–GA107 has the same known **512 KiB GSP load limit**, counted from the
+selected legacy image to the end of the payload. The loader rejects oversized
+images during preparation and enrollment, rather than letting firmware silently
+use the stock VBIOS. Plain normalized Ampere ROMs exceed it. **Experimental, not
+tested on hardware**: `nvbios normalize edited.rom gpu0.bin --representation ampere-relocated-v1`
+(Vix Editor 0.1.9 or newer) drops the UEFI image and the bytes after the last data image, which
+leaves about 443–506 KiB from the legacy image on the images examined (the file keeps
+a ~37 KiB prefix that is not sent); anything that does not verify is refused.
+If you try it, please open an issue with the result. GA100 uses different firmware
+and is outside this capacity audit.
+
 ## Multiple GPUs
 
 Select **1–32 GPUs**, repeating `--device INDEX PAYLOAD` for each one. Indices are

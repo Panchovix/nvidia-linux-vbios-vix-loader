@@ -2,7 +2,10 @@
 
 This inventory is an architecture gate, not evidence of table/editor support.
 Unknown IDs fail closed. Product names and BIOS version family corroborate scope;
-PCI neighborhoods alone do not authorize any device. No hardware is accessed.
+PCI neighborhoods alone do not authorize any device. EDITOR_ONLY IDs come from
+another explicit source and are recognized only for offline file editing
+(architecture(..., editor=True)); the loader and enrollment keep treating them as
+unknown. No hardware is accessed.
 """
 SOURCE = 'https://raw.githubusercontent.com/NVIDIA/open-gpu-kernel-modules/615.71.09/README.md'
 DEVICES = {
@@ -218,16 +221,28 @@ DEVICES = {
     0x31C3: ('excluded', 'NVIDIA GB300'),
 }
 
+# Offline editor only: absent from NVIDIA's table, so outside the loader and enrollment scope.
+EDITOR_ONLY = {
+    0x2501: ('ampere', 'NVIDIA GeForce RTX 3060', 'pci.ids: 10de:2501 GA106 [GeForce RTX 3060] (PG190 SKU 50, BIOS 94.06)'),
+}
 
-def architecture(device, versions=()):
+
+# GA100 uses a different GSP firmware; its receiver capacity has not been audited.
+GA100_DEVICE_IDS = frozenset((0x20B0, 0x20B2, 0x20B3, 0x20B5, 0x20B7, 0x20BD, 0x20F1, 0x20F3, 0x20F5, 0x20F6))
+
+def architecture(device, versions=(), editor=False):
     family, product = DEVICES.get(device, ('unknown', 'unknown PCI device'))
+    source = {'source': SOURCE, 'kind': 'explicit-pci-id', 'device': f'{device:04x}'}
+    if editor and device in EDITOR_ONLY:
+        family, product, note = EDITOR_ONLY[device]
+        source = {'source': note, 'kind': 'pci-ids-entry', 'device': f'{device:04x}', 'scope': 'offline editor only'}
     expected = {'ampere': '94.', 'ada': '95.', 'blackwell-gb20x': '98.'}.get(family)
-    if device in (0x20B0, 0x20B2, 0x20B3, 0x20B5, 0x20B7, 0x20BD, 0x20F1, 0x20F3, 0x20F5, 0x20F6):
+    if device in GA100_DEVICE_IDS:
         expected = '92.'  # NVIDIA DGX A100/A800 firmware release notes.
     coherent = bool(expected and versions and all(v.startswith(expected) for v in versions))
     return {'family': family, 'product': product, 'in_scope': family in
             ('ampere', 'ada', 'blackwell-gb20x'), 'bios_family_consistent': coherent,
-            'evidence': [{'source': SOURCE, 'kind': 'explicit-pci-id', 'device': f'{device:04x}'},
+            'evidence': [source,
                          {'kind': 'bios-version-family', 'versions': list(versions),
                           'expected_prefix': expected}],
             'reason': 'architecture excluded or unknown' if not expected else
