@@ -104,9 +104,10 @@ class FakeOperations:
             raise LifecycleError("depmod failure")
 
     def selected_module(self, kernel, name):
-        if self.fault == "selection":
+        managed = self.root / f"usr/lib/modules/{kernel}/updates/vbios-override/{name}.ko"
+        if self.fault == "selection" or not managed.exists():
             return str(self.root / f"usr/lib/modules/{kernel}/extra/{name}.ko")
-        return str(self.root / f"usr/lib/modules/{kernel}/updates/vbios-override/{name}.ko")
+        return str(managed)
 
     def coordinate_akmods(self, kernel, config):
         self.events.append("akmods:" + kernel)
@@ -125,10 +126,21 @@ class FakeOperations:
         if self.after_initramfs:
             self.after_initramfs()
 
+    def initramfs_members(self, image):
+        if self.fault == "listing":
+            raise LifecycleError("lsinitrd failed")
+        try:
+            return list(json.loads(image.read_bytes()))
+        except ValueError:
+            return []  # a normal image written by the fixture: no NVIDIA module
+
     def extract(self, image, member):
         if self.fault == "extract":
             return b"wrong bytes"
-        value = json.loads(image.read_bytes()).get(member)
+        try:
+            value = json.loads(image.read_bytes()).get(member)
+        except ValueError:
+            return None  # a normal image written by the fixture, not by this fake dracut
         return base64.b64decode(value) if value is not None else None
 
     def restore_labels(self, paths):
@@ -281,6 +293,430 @@ class LifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(LifecycleError, "exact installed userspace"):
             self.worker.reconcile(NEW)
         self.assertEqual(self.ops.builds, 0)
+
+    def fleet(self):
+        return json.loads((self.root / STATE.lstrip("/") / "fleet.json").read_text())
+
+    def managed_modules(self, kernel=NEW):
+        return self.root / f"usr/lib/modules/{kernel}/updates/vbios-override"
+
+    def stock(self, kernel, version):
+        """The distribution's own nvidia.ko for `kernel` (akmods/DKMS)."""
+        atomic_write(self.root / f"usr/lib/modules/{kernel}/extra/nvidia.ko", json.dumps({"version": version}).encode())
+
+    def register_source(self, version):
+        source = self.root / f"var/lib/nvidia-vbios/sources/{version}"
+        atomic_write(source / "version.mk", version.encode())
+        atomic_write(source / "Makefile", b"reviewed new driver build script")
+        self.config["sources"].append({"version": version, "path": f"/var/lib/nvidia-vbios/sources/{version}",
+             "source_hashes": {"version.mk": digest(version.encode())},
+             "tree_sha256": source_tree_hash(source, self.root), "p2p_preferred": True})
+        self.write_config()
+
+    def test_driver_drift_parks_modules_and_boots_newest_normal_entry(self):
+        ready = self.worker.reconcile(NEW)
+        modules = self.managed_modules()
+        files = {path.name: path.read_bytes() for path in modules.iterdir()}
+        self.stock(NEW, "615.78.08")
+        self.ops.version = "615.78.08"
+        result = self.worker.reconcile(NEW)
+        self.assertEqual((result["state"], result["marker"]), ("driver-drift", "VBIOS_DRIFT"))
+        self.assertEqual(self.ops.builds, 1)
+        self.assertFalse(modules.exists())
+        parked = self.root / result["parked"][0].lstrip("/")
+        self.assertEqual(parked.parent, self.root / "usr/lib/modules")
+        self.assertTrue(parked.name.startswith(".vbios-parked-" + NEW + "-"))
+        self.assertEqual({path.name: path.read_bytes() for path in parked.iterdir()}, files)
+        self.assertEqual(result["stock_module"], str(self.root / f"usr/lib/modules/{NEW}/extra/nvidia.ko"))
+        self.assertEqual(self.ops.environment["saved_entry"], "normal-" + NEW)
+        self.assertEqual(result["entry"], "normal-" + NEW)
+        self.assertEqual((result["installed_driver"], result["built_driver"]), ("615.78.08", VERSION))
+        self.assertEqual(result["normal_image"], "clean")
+        self.assertIn("exact installed userspace", result["error"])
+        self.assertEqual(result["resume"], "nvbios system post-install --source PATH")
+        state = self.root / STATE.lstrip("/")
+        self.assertEqual(self.status(), result)
+        self.assertEqual(json.loads((state / f"attempt-{NEW}.json").read_text()), result)
+        drift = self.fleet()["drift"]
+        self.assertEqual((drift["version"], drift["kernel"], drift["entry"]), ("615.78.08", NEW, "normal-" + NEW))
+        # The previous READY entry and image stay for an explicit return.
+        self.assertTrue((self.root / f"boot/loader/entries/{ready['entry']}.conf").exists())
+        self.assertEqual(self.fleet()["last_ready"]["entry"], ready["entry"])
+
+    def test_driver_drift_after_run_installer_emptied_the_override_directory(self):
+        # nvidia-installer backs up every nvidia*.ko under the running kernel, ours included.
+        self.worker.reconcile(NEW)
+        for member in self.managed_modules().iterdir():
+            member.unlink()
+        self.stock(NEW, "615.78.08")
+        self.ops.version = "615.78.08"
+        result = self.worker.reconcile(NEW)
+        self.assertEqual((result["state"], result["parked"]), ("driver-drift", []))
+        self.assertEqual(result["stock_module"], str(self.root / f"usr/lib/modules/{NEW}/extra/nvidia.ko"))
+        self.assertEqual(self.ops.environment["saved_entry"], "normal-" + NEW)
+
+    def test_driver_drift_parks_the_remaining_modules_and_refuses_foreign_files(self):
+        self.worker.reconcile(NEW)
+        for member in self.managed_modules().iterdir():
+            if member.name != "nvidia-uvm.ko":
+                member.unlink()
+        self.stock(NEW, "615.78.08")
+        self.ops.version = "615.78.08"
+        result = self.worker.reconcile(NEW)
+        parked = self.root / result["parked"][0].lstrip("/")
+        self.assertEqual([path.name for path in parked.iterdir()], ["nvidia-uvm.ko"])
+        self.assertEqual(self.ops.environment["saved_entry"], "normal-" + NEW)
+        atomic_write(self.managed_modules() / "nvidia.ko", b"FOREIGN")
+        with self.assertRaisesRegex(LifecycleError, "exact installed userspace"):
+            self.worker.reconcile(NEW)
+        attempt = json.loads((self.root / STATE.lstrip("/") / f"attempt-{NEW}.json").read_text())
+        self.assertIn("not parked", attempt["fail_safe_error"])
+
+    def test_driver_drift_on_new_kernel_selects_its_normal_entry_and_parks_older_kernels(self):
+        ready = self.worker.reconcile(NEW)
+        self.add_kernel(NEXT)
+        self.ops.environment["saved_entry"] = "normal-" + NEXT
+        self.stock(NEXT, "615.78.08")
+        self.ops.version = "615.78.08"
+        result = self.worker.reconcile(NEXT)
+        self.assertEqual(result["state"], "driver-drift")
+        self.assertEqual(self.ops.environment["saved_entry"], "normal-" + NEXT)
+        self.assertEqual(result["stock_module"], str(self.root / f"usr/lib/modules/{NEXT}/extra/nvidia.ko"))
+        # The older kernel's normal entry would otherwise still load our old modules.
+        self.assertFalse(self.managed_modules(NEW).exists())
+        self.assertEqual([Path(path).name.rsplit("-", 1)[0] for path in result["parked"]], [".vbios-parked-" + NEW])
+        self.assertIn("default:" + ready["entry"], self.ops.events)
+
+    def test_drift_parks_the_kernel_of_a_user_chosen_normal_default_and_reports_its_module(self):
+        # The timer reconciles the newest kernel, while the user chose an older kernel's normal entry.
+        self.worker.reconcile(NEW)
+        self.add_kernel(NEXT)
+        self.stock(NEW, "615.78.08")
+        self.ops.environment["saved_entry"] = "normal-" + NEW
+        self.ops.version = "615.78.08"
+        result = self.worker.reconcile(NEXT)
+        self.assertEqual((result["state"], self.ops.environment["saved_entry"]), ("driver-drift", "normal-" + NEW))
+        self.assertFalse(self.managed_modules(NEW).exists())
+        self.assertEqual((result["entry"], result["stock_module"], result["stock_module_version"], result["boots_normal_driver"]),
+                         ("normal-" + NEW, str(self.root / f"usr/lib/modules/{NEW}/extra/nvidia.ko"), "615.78.08", True))
+
+    def test_kernel_update_during_drift_moves_our_normal_default_forward(self):
+        # GRUB_DEFAULT=saved (Debian, Arch) keeps normal-NEW after NEXT is installed.
+        self.worker.reconcile(NEW)
+        self.stock(NEW, "615.78.08")
+        self.ops.version = "615.78.08"
+        self.worker.reconcile(NEW)
+        self.add_kernel(NEXT)
+        self.stock(NEXT, "615.78.08")
+        self.assertEqual(queue_event("add", NEXT, self.root, self.ops)["retained_default"], "normal-" + NEW)
+        result = self.worker.reconcile(NEXT)
+        self.assertEqual((result["state"], result["entry"]), ("driver-drift", "normal-" + NEXT))
+        self.assertEqual(self.ops.environment["saved_entry"], "normal-" + NEXT)
+        self.assertEqual(queue_event("changed", "userspace", self.root, self.ops)["retained_default"], "normal-" + NEXT)
+        self.register_source("615.78.08")
+        ready = self.worker.reconcile(NEXT)
+        self.assertEqual((ready["state"], self.ops.environment["saved_entry"]), ("ready", ready["entry"]))
+
+    def test_kernel_update_during_drift_keeps_a_default_whose_module_matches(self):
+        self.worker.reconcile(NEW)
+        self.stock(NEW, "615.78.08")
+        self.ops.version = "615.78.08"
+        self.assertEqual(self.worker.reconcile(NEW)["entry"], "normal-" + NEW)
+        self.add_kernel(NEXT)  # DKMS/akmods could not build the module for NEXT
+        queue_event("add", NEXT, self.root, self.ops)
+        result = self.worker.reconcile(NEXT)
+        self.assertEqual((result["entry"], result["boots_normal_driver"]), ("normal-" + NEW, True))
+        self.assertEqual(self.ops.environment["saved_entry"], "normal-" + NEW)
+
+    def test_drift_selects_the_newest_normal_entry_whose_module_matches(self):
+        # One upgrade brought kernel NEXT and the new driver; its module built for NEW only.
+        self.worker.reconcile(NEW)
+        self.add_kernel(NEXT)
+        queue_event("add", NEXT, self.root, self.ops)  # the guard keeps READY
+        self.stock(NEW, "615.78.08")
+        self.ops.version = "615.78.08"
+        result = self.worker.reconcile(NEXT)
+        self.assertEqual((result["state"], self.ops.environment["saved_entry"]), ("driver-drift", "normal-" + NEW))
+        self.assertEqual((result["stock_module_version"], result["boots_normal_driver"]), ("615.78.08", True))
+        self.assertEqual(queue_event("changed", "userspace", self.root, self.ops)["retained_default"], "normal-" + NEW)
+
+    def test_drift_without_a_matching_distribution_module_keeps_the_ready_default(self):
+        # .run --no-kernel-modules or a failed akmods/DKMS build: no normal entry loads the new
+        # driver, and the READY image still loads a module, so post-install can read GPU identity.
+        ready = self.worker.reconcile(NEW)
+        self.stock(NEW, VERSION)
+        self.ops.version = "615.78.08"
+        result = self.worker.reconcile(NEW)
+        self.assertEqual((result["state"], result["entry"], result["boots_normal_driver"]), ("driver-drift", ready["entry"], False))
+        self.assertEqual(self.ops.environment["saved_entry"], ready["entry"])
+        self.assertFalse(self.managed_modules().exists())
+        self.assertEqual(queue_event("add", NEW, self.root, self.ops)["retained_default"], ready["entry"])
+        self.stock(NEW, "615.78.08")  # built later
+        self.assertEqual(self.worker.reconcile(NEW)["entry"], "normal-" + NEW)
+        self.assertEqual(self.ops.environment["saved_entry"], "normal-" + NEW)
+
+    def test_deliberate_same_kernel_normal_default_still_gets_our_modules_parked(self):
+        self.worker.reconcile(NEW)
+        self.ops.environment["saved_entry"] = "normal-" + NEW
+        events = len(self.ops.events)
+        with self.assertRaisesRegex(LifecycleError, "foreign or unrelated"):
+            self.worker.reconcile(NEW)
+        self.assertEqual(self.ops.events[events:], [])  # no drift: refused before any package lock
+        self.ops.version = "615.78.08"
+        result = self.worker.reconcile(NEW)
+        self.assertEqual((result["state"], result["entry"]), ("driver-drift", "normal-" + NEW))
+        self.assertFalse(self.managed_modules().exists())
+        self.assertNotIn("default:normal-" + NEW, self.ops.events)
+        self.assertEqual(self.ops.environment["saved_entry"], "normal-" + NEW)
+
+    def test_fail_safe_says_whether_the_normal_entry_has_a_matching_stock_module(self):
+        self.worker.reconcile(NEW)
+        stock = self.root / f"usr/lib/modules/{NEW}/extra/nvidia.ko"
+        atomic_write(stock, json.dumps({"version": VERSION}).encode())  # the new kmod failed to build
+        self.ops.version = "615.78.08"
+        result = self.worker.reconcile(NEW)
+        self.assertEqual((result["stock_module_version"], result["boots_normal_driver"]), (VERSION, False))
+        atomic_write(stock, json.dumps({"version": "615.78.08"}).encode())
+        result = self.worker.reconcile(NEW)
+        self.assertEqual((result["stock_module_version"], result["boots_normal_driver"]), ("615.78.08", True))
+        stock.unlink()  # .run --no-kernel-modules
+        self.assertEqual(self.worker.reconcile(NEW)["boots_normal_driver"], False)
+
+    def test_driver_drift_second_run_changes_nothing(self):
+        self.worker.reconcile(NEW)
+        self.ops.version = "615.78.08"
+        first = self.worker.reconcile(NEW)
+        fleet, events = self.fleet(), list(self.ops.events)
+        second = self.worker.reconcile(NEW)
+        self.assertEqual(second["state"], "driver-drift")
+        self.assertEqual(second["parked"], first["parked"])
+        self.assertEqual(self.fleet(), fleet)
+        self.assertFalse([event for event in self.ops.events[len(events):] if event.startswith(("default:", "build"))])
+        self.assertTrue((self.root / first["parked"][0].lstrip("/")).is_dir())
+
+    def test_guard_under_drift_keeps_normal_moves_managed_and_preserves_foreign(self):
+        ready = self.worker.reconcile(NEW)
+        self.stock(NEW, "615.78.08")
+        self.ops.version = "615.78.08"
+        self.worker.reconcile(NEW)
+        self.add_kernel(NEXT)
+        self.ops.environment["saved_entry"] = "normal-" + NEXT
+        self.assertEqual(queue_event("add", NEXT, self.root, self.ops)["retained_default"], "normal-" + NEXT)
+        self.assertEqual(self.ops.environment["saved_entry"], "normal-" + NEXT)
+        self.ops.environment["saved_entry"] = ready["entry"]
+        self.assertEqual(queue_event("add", NEXT, self.root, self.ops)["retained_default"], "normal-" + NEW)
+        self.assertEqual(self.ops.environment["saved_entry"], "normal-" + NEW)
+        for environment in ({"saved_entry": "windows-other-os"}, {"saved_entry": "normal-" + OLD},
+                            {"saved_entry": ready["entry"], "next_entry": "some-other-test"}):
+            self.ops.environment = dict(environment)
+            with self.subTest(environment=environment), self.assertRaisesRegex(LifecycleError, "foreign or unrelated|transition is pending"):
+                queue_event("add", NEXT, self.root, self.ops)
+            self.assertEqual(self.ops.environment, environment)
+
+    def normal_image(self, kernel, members):
+        """A normal initramfs holding these (member, modinfo version) modules."""
+        atomic_write(self.root / f"boot/initramfs-{kernel}.img", json.dumps(
+            {name: base64.b64encode(json.dumps({"version": version}).encode()).decode()
+             for name, version in members.items()}).encode())
+
+    def test_normal_image_with_another_nvidia_build_is_not_selected(self):
+        ready = self.worker.reconcile(NEW)
+        # The rootfs module is the new driver, but the image early-loads the old stock build.
+        stale = f"usr/lib/modules/{NEW}/extra/nvidia/nvidia.ko.xz"
+        self.normal_image(NEW, {stale: VERSION, "usr/lib/modules/other-kernel/extra/nvidia.ko": "1.0.0"})
+        self.stock(NEW, "615.78.08")
+        self.ops.version = "615.78.08"
+        result = self.worker.reconcile(NEW)
+        self.assertEqual((result["state"], result["normal_image"], result["boots_normal_driver"]),
+                         ("driver-drift", "mismatched", False))
+        self.assertEqual((self.ops.environment["saved_entry"], result["entry"]), (ready["entry"], ready["entry"]))
+        self.assertFalse(self.managed_modules().exists())
+        # Regenerated with the distribution's new build, the image is verified and selected.
+        self.normal_image(NEW, {stale: "615.78.08", f"usr/lib/modules/{NEW}/extra/nvidia/nvidia-drm.ko.zst": "615.78.08"})
+        result = self.worker.reconcile(NEW)
+        self.assertEqual((result["normal_image"], result["boots_normal_driver"], result["entry"]),
+                         ("matching", True, "normal-" + NEW))
+        self.assertEqual(self.ops.environment["saved_entry"], "normal-" + NEW)
+        # One stale companion module is enough to refuse the image.
+        self.normal_image(NEW, {stale: "615.78.08", f"lib/modules/{NEW}/updates/dkms/nvidia-current-uvm.ko": VERSION})
+        from nvidia_vbios.lifecycle.config import load_config
+        config = load_config(self.worker.config_path, self.root, require_enabled=False)
+        self.assertEqual(self.worker._normal_image_state(config, NEW, "615.78.08"), "mismatched")
+
+    def test_unreadable_normal_image_is_neither_selected_nor_reported_bootable(self):
+        ready = self.worker.reconcile(NEW)
+        self.stock(NEW, "615.78.08")
+        self.ops.version = "615.78.08"
+        for fault in ("listing", "extract"):
+            with self.subTest(fault=fault):
+                self.normal_image(NEW, {f"usr/lib/modules/{NEW}/extra/nvidia.ko": "615.78.08"})
+                self.ops.fault = fault
+                result = self.worker.reconcile(NEW)
+                self.assertEqual((result["state"], result["normal_image"], result["boots_normal_driver"]),
+                                 ("driver-drift", "unknown", False))
+                self.assertEqual(self.ops.environment["saved_entry"], ready["entry"])
+        self.ops.fault = None
+        result = self.worker.reconcile(NEW)
+        self.assertEqual((result["normal_image"], result["boots_normal_driver"]), ("matching", True))
+        self.assertEqual(self.ops.environment["saved_entry"], "normal-" + NEW)
+
+    def test_normal_image_with_our_module_blocks_until_it_is_regenerated(self):
+        ready = self.worker.reconcile(NEW)
+        member = f"usr/lib/modules/{NEW}/updates/vbios-override/nvidia.ko"
+        atomic_write(self.root / f"boot/initramfs-{NEW}.img",
+                     json.dumps({member: base64.b64encode(b"OUR MODULE").decode()}).encode())
+        self.stock(NEW, "615.78.08")
+        self.ops.version = "615.78.08"
+        # Both entries load the old module from their image: not a successful fail-safe.
+        with self.assertRaisesRegex(LifecycleError, f"fail-safe: .*regenerate it with `dracut -f --kver {NEW}`"):
+            self.worker.reconcile(NEW)
+        self.assertEqual(self.status()["state"], "blocked")
+        self.assertEqual(self.ops.environment["saved_entry"], ready["entry"])
+        self.assertFalse(self.managed_modules().exists())
+        self.assertEqual(self.fleet()["drift"]["entry"], ready["entry"])
+        self.assertEqual(queue_event("add", NEW, self.root, self.ops)["retained_default"], ready["entry"])
+        # After the regeneration (with our modules parked) the next run boots the normal entry.
+        atomic_write(self.root / f"boot/initramfs-{NEW}.img", b"REGENERATED NORMAL IMAGE")
+        result = self.worker.reconcile(NEW)
+        self.assertEqual((result["state"], result["normal_image"]), ("driver-drift", "clean"))
+        self.assertEqual(self.ops.environment["saved_entry"], "normal-" + NEW)
+        from nvidia_vbios.lifecycle.engine import regenerate_command
+        self.assertEqual([regenerate_command({"boot": {"initramfs": name}}, NEW) for name in ("initramfs-tools", "mkinitcpio")],
+                         [f"update-initramfs -u -k {NEW}", "mkinitcpio -P"])
+
+    def test_lock_busy_or_early_failure_under_drift_stays_plain_blocked(self):
+        from unittest.mock import patch
+        from nvidia_vbios.lifecycle.security import LockBusy
+        ready = self.worker.reconcile(NEW)
+        self.ops.version = "615.78.08"
+        lock = self.root / "run/akmods/akmods.lock"
+        atomic_write(lock, b"")
+        with lock.open("rb") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaisesRegex(LifecycleError, "lock busy"):
+                self.worker.reconcile(NEW)
+        with patch("nvidia_vbios.lifecycle.engine.select_source", side_effect=LockBusy("update/build lock busy: other")):
+            with self.assertRaisesRegex(LifecycleError, "lock busy"):
+                self.worker.reconcile(NEW)
+        self.ops.environment["saved_entry"] = "windows-other-os"
+        with self.assertRaisesRegex(LifecycleError, "foreign or unrelated"):
+            self.worker.reconcile(NEW)
+        self.assertTrue(self.managed_modules().exists())
+        self.assertNotIn("drift", self.fleet())
+        attempt = json.loads((self.root / STATE.lstrip("/") / f"attempt-{NEW}.json").read_text())
+        self.assertEqual(attempt["state"], "blocked")
+        self.assertNotIn("fail_safe_error", attempt)
+        self.assertEqual(self.status()["entry"], ready["entry"])
+
+    def test_same_version_failure_stays_blocked_with_preserved_ready(self):
+        ready = self.worker.reconcile(NEW)
+        self.ops.fault = "headers"
+        with self.assertRaisesRegex(LifecycleError, "kernel-devel"):
+            self.worker.reconcile(NEW)
+        attempt = json.loads((self.root / STATE.lstrip("/") / f"attempt-{NEW}.json").read_text())
+        self.assertEqual((attempt["state"], attempt["preserved_ready"]), ("blocked", True))
+        self.assertEqual(self.status()["state"], "ready")
+        self.assertTrue(self.managed_modules().exists())
+        self.assertNotIn("drift", self.fleet())
+        self.assertEqual(self.ops.environment["saved_entry"], ready["entry"])
+
+    def test_build_failure_under_drift_rolls_back_to_the_normal_entry(self):
+        self.worker.reconcile(NEW)
+        self.stock(NEW, "615.78.08")
+        self.ops.version = "615.78.08"
+        self.worker.reconcile(NEW)
+        self.register_source("615.78.08")
+        self.ops.fault = "default"
+        result = self.worker.reconcile(NEW)
+        self.assertEqual(result["state"], "driver-drift")
+        self.assertIn("grub wrote then failed", result["error"])
+        self.assertEqual(self.ops.environment["saved_entry"], "normal-" + NEW)
+        self.assertFalse(self.managed_modules().exists())
+        journal = json.loads((self.root / STATE.lstrip("/") / "transaction.json").read_text())
+        self.assertEqual((journal["phase"], journal["previous_default"]), ("rolled-back", "normal-" + NEW))
+
+    def test_failed_rollback_of_an_interrupted_transaction_is_no_fail_safe(self):
+        self.worker.reconcile(NEW)
+        self.ops.version = "615.78.08"
+        self.worker.reconcile(NEW)
+        self.register_source("615.78.08")
+        def kernel_update_during_build():
+            self.add_kernel(NEXT)
+            self.ops.environment["saved_entry"] = "normal-" + NEXT
+        self.ops.after_build = kernel_update_during_build
+        with self.assertRaisesRegex(LifecycleError, "rollback requires review"):
+            self.worker.reconcile(NEW)
+        self.ops.after_build = None
+        # The next run resumes that journal; its rollback fails again and needs review.
+        with self.assertRaisesRegex(LifecycleError, "rollback requires review: GRUB default changed externally"):
+            self.worker.reconcile(NEXT)
+        self.assertEqual(self.status(NEXT)["state"], "blocked")
+        self.assertIn("GRUB default changed externally", self.status(NEXT)["rollback_error"])
+        journal = json.loads((self.root / STATE.lstrip("/") / "transaction.json").read_text())
+        self.assertEqual(journal["phase"], "rollback-failed")
+
+    def test_failed_builds_do_not_pile_up_source_copies(self):
+        self.ops.fault = "build"
+        for _ in range(2):
+            with self.assertRaisesRegex(LifecycleError, "make failed"):
+                self.worker.reconcile(NEW)
+            self.ops.fault = "build"
+        workspaces = list((self.root / STATE.lstrip("/") / "transactions").iterdir())
+        self.assertEqual(len(workspaces), 2)
+        for workspace in workspaces:
+            self.assertFalse((workspace / "source").exists())
+            self.assertTrue((workspace / "build.log").is_file())
+            self.assertTrue((workspace / "source-manifest.json").is_file())
+
+    def test_registered_new_source_ends_drift_and_removes_parked_modules(self):
+        first = self.worker.reconcile(NEW)
+        self.ops.version = "615.78.08"
+        drift = self.worker.reconcile(NEW)
+        parked = self.root / drift["parked"][0].lstrip("/")
+        self.register_source("615.78.08")
+        ready = self.worker.reconcile(NEW)
+        self.assertEqual((ready["state"], ready["driver"]), ("ready", "615.78.08"))
+        self.assertEqual(self.ops.environment["saved_entry"], ready["entry"])
+        self.assertNotEqual(ready["entry"], first["entry"])
+        self.assertNotIn("drift", self.fleet())
+        self.assertFalse(parked.exists())
+        self.assertNotIn("cleanup_warnings", ready)
+        self.assertTrue(self.managed_modules().exists())
+        self.assertEqual(self.worker.ready_status(NEW)["entry"], ready["entry"])
+
+    def test_changed_parked_modules_are_left_in_place_with_a_warning(self):
+        self.worker.reconcile(NEW)
+        self.ops.version = "615.78.08"
+        parked = self.root / self.worker.reconcile(NEW)["parked"][0].lstrip("/")
+        atomic_write(parked / "nvidia.ko", b"CHANGED AFTER PARKING")
+        self.register_source("615.78.08")
+        ready = self.worker.reconcile(NEW)
+        self.assertEqual(ready["state"], "ready")
+        self.assertTrue(parked.exists())
+        self.assertTrue(any("left in place" in warning for warning in ready["cleanup_warnings"]))
+
+    def test_drift_without_a_bootable_normal_image_stays_blocked(self):
+        ready = self.worker.reconcile(NEW)
+        (self.root / f"boot/initramfs-{NEW}.img").unlink()
+        self.ops.version = "615.78.08"
+        with self.assertRaisesRegex(LifecycleError, "exact installed userspace"):
+            self.worker.reconcile(NEW)
+        attempt = json.loads((self.root / STATE.lstrip("/") / f"attempt-{NEW}.json").read_text())
+        self.assertEqual(attempt["state"], "blocked")
+        self.assertIn(f"initramfs-{NEW}.img", attempt["fail_safe_error"])
+        self.assertTrue(self.managed_modules().exists())
+        self.assertEqual(self.ops.environment["saved_entry"], ready["entry"])
+
+    def test_two_part_installed_version_still_reaches_the_fail_safe(self):
+        from nvidia_vbios.lifecycle.system import SystemOperations
+        self.assertEqual(SystemOperations._upstream_version("575.64-1"), "575.64")
+        self.assertEqual(SystemOperations._upstream_version("1:580.82.07-0ubuntu1"), "580.82.07")
+        self.worker.reconcile(NEW)
+        self.stock(NEW, "615.80")
+        self.ops.version = "615.80"
+        result = self.worker.reconcile(NEW)
+        self.assertEqual((result["state"], result["installed_driver"]), ("driver-drift", "615.80"))
+        self.assertEqual(self.ops.environment["saved_entry"], "normal-" + NEW)
 
     def test_changed_rom_and_unselected_identity_are_rejected(self):
         atomic_write(self.root / self.config["devices"][0]["payload_path"].lstrip("/"), b"different bytes")

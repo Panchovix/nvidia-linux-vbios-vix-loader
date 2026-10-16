@@ -433,5 +433,38 @@ class PortableInitramfsTests(unittest.TestCase):
             subject._db_has_certificate(b'\0' * 16 + struct.pack('<III', 100, 0, 20), self.ops.der)
 
 
+
+class LsinitrdListingTests(unittest.TestCase):
+    def test_lists_every_archive_member_and_ignores_headers(self):
+        listing = """Image: /boot/initramfs-7.2.9-101.fc43.x86_64.img: 178M
+========================================================================
+Early CPIO image
+========================================================================
+drwxr-xr-x   2 root     root            0 Oct 13  2025 .
+-rw-r--r--   1 root     root       129556 Oct 13  2025 kernel/x86/microcode/AuthenticAMD.bin
+========================================================================
+Version: dracut-107-8.fc43
+
+Arguments:  -f --kver '7.2.9-101.fc43.x86_64'
+
+dracut modules:
+bash
+systemd
+========================================================================
+lrwxrwxrwx   1 root     root            7 Oct 13 10:00 lib -> usr/lib
+-rw-r--r--   1 root     root     23456789 Oct 13 10:00 usr/lib/modules/7.2.9-101.fc43.x86_64/extra/nvidia/nvidia.ko.xz
+drwxr-xr-x.  3 root     root            0 Oct 13 10:00 usr/lib/modules/7.2.9-101.fc43.x86_64/extra
+========================================================================
+"""
+        self.assertEqual(subject.parse_lsinitrd(listing),
+                         ['kernel/x86/microcode/AuthenticAMD.bin', 'lib',
+                          'usr/lib/modules/7.2.9-101.fc43.x86_64/extra/nvidia/nvidia.ko.xz',
+                          'usr/lib/modules/7.2.9-101.fc43.x86_64/extra'])
+
+    def test_an_empty_or_foreign_listing_is_an_error_not_an_empty_image(self):
+        for listing in ('', 'Image: /boot/x.img: 0\nnot a cpio listing\n'):
+            with self.subTest(listing=listing), self.assertRaises(LifecycleError):
+                subject.parse_lsinitrd(listing)
+
 if __name__ == '__main__':
     unittest.main()

@@ -15,4 +15,4 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-ReadWritePaths=/var/lib/nvidia-vbios /usr/lib/modules /usr/lib/firmware/nvidia /boot /run/akmods /usr/lib/sysimage/rpm
+ReadWritePaths=/var/lib/nvidia-vbios /etc/nvidia-vbios /usr/lib/modules /usr/lib/firmware/nvidia /boot /run/akmods /usr/lib/sysimage/rpm

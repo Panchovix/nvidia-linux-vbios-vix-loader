@@ -158,6 +158,73 @@ class PostInstallTests(unittest.TestCase):
         self.assertTrue(self.read_config()['sources'][0]['p2p_preferred'])
         self.assertEqual(self.read_config()['devices'],self.before['devices'])
 
+    def stock(self, version):
+        """The distribution's own nvidia.ko (akmods/DKMS)."""
+        atomic_write(self.f.root / f'usr/lib/modules/{OLD}/extra/nvidia.ko', json.dumps({'version': version}).encode())
+
+    def drift(self, version='615.99.01'):
+        from nvidia_vbios.lifecycle import Reconciler
+        self.f.ops.version = version
+        self.stock(version)
+        result = Reconciler(self.f.root, self.f.ops).reconcile(OLD)
+        self.assertEqual(result['state'], 'driver-drift')
+        self.assertEqual(self.f.ops.environment['saved_entry'], self.f.normal)
+        atomic_write(self.f.source / 'version.mk', version.encode())
+        return result
+
+    def test_failed_post_install_for_a_new_driver_falls_back_to_the_normal_entry(self):
+        # The old READY entry would load modules built for the old driver against the new userspace.
+        self.f.ops.version = '615.99.01'
+        self.stock('615.99.01')
+        atomic_write(self.f.source / 'version.mk', b'615.99.01')
+        self.f.ops.fault = 'build'
+        with self.assertRaisesRegex(LifecycleError, 'did not establish READY'):
+            self.run_update()
+        self.assertEqual(self.f.ops.environment['saved_entry'], self.f.normal)
+        report = json.loads(self.f.worker.path(BASE + '/post-install.json').read_text())
+        self.assertEqual(report['driver_drift']['entry'], self.f.normal)
+        self.assertTrue(all(self.f.worker.path(path).is_dir() for path in report['driver_drift']['parked']))
+        self.assertIn(f'the default is {self.f.normal}', report['recovery'])
+        self.f.ops.fault = None
+        self.assertEqual(self.run_update()['state'], 'complete')
+
+    def test_failed_post_install_without_a_new_distribution_module_keeps_ready(self):
+        # .run --no-kernel-modules: the normal entry would load no NVIDIA module at all, and
+        # rerunning post-install after a reboot needs one loaded to read the GPU identity.
+        self.f.ops.version = '615.99.01'
+        atomic_write(self.f.source / 'version.mk', b'615.99.01')
+        self.f.ops.fault = 'build'
+        with self.assertRaisesRegex(LifecycleError, 'did not establish READY'):
+            self.run_update()
+        self.assertEqual(self.f.ops.environment['saved_entry'], self.previous['entry'])
+        report = json.loads(self.f.worker.path(BASE + '/post-install.json').read_text())
+        self.assertIn(f'the default is {self.previous["entry"]}', report['recovery'])
+        self.f.ops.fault = None
+        self.assertEqual(self.run_update()['state'], 'complete')
+
+    def test_failed_post_install_under_drift_keeps_the_normal_default(self):
+        drift = self.drift()
+        self.assertEqual(self.f.worker.status()['driver_drift']['entry'], self.f.normal)
+        start = len(self.f.ops.events)
+        self.f.ops.fault = 'build'
+        with self.assertRaisesRegex(LifecycleError, 'did not establish READY: make failed'):
+            self.run_update()
+        self.assertEqual(self.f.ops.environment['saved_entry'], self.f.normal)
+        self.assertFalse(self.f.ops.enabled)
+        report = json.loads(self.f.worker.path(BASE + '/post-install.json').read_text())
+        self.assertEqual((report['state'], report['recovery_errors']), ('blocked', []))
+        self.f.ops.fault = None
+        seen = []
+        self.f.ops.after_build = lambda: seen.append(self.f.ops.environment['saved_entry'])
+        result = self.run_update()
+        self.assertEqual(result['state'], 'complete')
+        # The old READY image was never reselected while the new modules were built.
+        self.assertEqual(seen, [self.f.normal])
+        self.assertNotIn('default:' + self.previous['entry'], self.f.ops.events[start:])
+        self.assertEqual(self.f.ops.environment['saved_entry'], result['entry'])
+        self.assertIsNone(self.f.worker.status()['driver_drift'])
+        self.assertFalse(self.f.worker.path(drift['parked'][0]).exists())
+
     def test_explicit_current_kernel_normal_selection_can_return_to_ready(self):
         self.f.worker.disable()
         self.assertEqual(self.f.ops.environment['saved_entry'],self.f.normal)

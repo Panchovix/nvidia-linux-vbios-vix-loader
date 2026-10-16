@@ -168,7 +168,7 @@ class Onboarding:
         artifacts[str(directory / (name + '.conf'))] = digest(data)
         return name, artifacts
 
-    def prepare(self, *, devices, driver_source, output, p2p_preferred=False,
+    def prepare(self, *, devices, driver_source, output, p2p_preferred=False, no_auto_source=False,
                 userspace=None, fallback_entry=None, jobs=1, representations=(),
                 nvidia_smi='/usr/bin/nvidia-smi', libraries=None, boot_backend=None, initramfs=None,
                 boot_root=None, esp=None, xbootldr=None, grub_config=None, signing_key=None, signing_certificate=None,
@@ -292,6 +292,8 @@ class Onboarding:
             files[archive_name], files[payload_name] = archive, payload
         profile = {'devices': records, 'driver_sources': [{'path': str(source), 'p2p_preferred': bool(p2p_preferred)}],
                    'userspace': provider, 'fallback_entry': fallback, 'jobs': jobs,
+                   # After a package-manager driver upgrade, fetch the matching upstream tag.
+                   'auto_source': userspace in ('rpm', 'deb', 'pacman') and not p2p_preferred and not no_auto_source,
                    'discovery': [{'index': gpu['index'], 'name': gpu['name'], 'uuid': gpu['uuid'], 'bdf': gpu['bdf']} for gpu, _ in selected]}
         if boot:
             profile['boot'] = boot
@@ -336,6 +338,8 @@ def main(argv=None, *, root=Path('/'), operations=None):
     prepare.add_argument('--device', action='append', nargs=2, metavar=('SELECTOR', 'ROM'), required=True)
     prepare.add_argument('--driver-source', type=Path, required=True)
     prepare.add_argument('--p2p-preferred', action='store_true')
+    prepare.add_argument('--no-auto-source', action='store_true',
+                         help='never download the matching open-gpu-kernel-modules tag after a driver package upgrade')
     prepare.add_argument('--userspace', choices=('rpm', 'deb', 'pacman', 'manual'))
     prepare.add_argument('--nvidia-smi', default='/usr/bin/nvidia-smi')
     prepare.add_argument('--library', action='append', dest='libraries')

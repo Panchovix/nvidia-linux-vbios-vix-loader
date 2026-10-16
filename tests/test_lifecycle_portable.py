@@ -94,8 +94,17 @@ class PortableFakeOperations(FakeOperations):
             self.after_initramfs()
         return evidence
 
+    def portable_members(self, image):
+        try:
+            return list(json.loads(image.read_bytes()))
+        except ValueError:
+            return []  # a normal image written by the fixture
+
     def portable_extract(self, image, members):
-        archive = json.loads(image.read_bytes())
+        try:
+            archive = json.loads(image.read_bytes())
+        except ValueError:
+            archive = {}  # a normal image written by the fixture
         result = {member: base64.b64decode(archive[member]) if member in archive else None for member in members}
         if self.corrupt_member:
             member = next((name for name in members if self.corrupt_member in name), None)
@@ -436,6 +445,50 @@ class PortableLifecycleTests(unittest.TestCase):
 
     def test_unmanaged_uki_is_not_overwritten(self):
         self._assert_unmanaged_artifact_is_preserved('uki', 'entry_path')
+
+    def test_driver_drift_parks_modules_so_dkms_stock_module_is_selected(self):
+        self.setup_profile('grub')
+        ready = self.worker.reconcile(self.new)
+        managed = self.root / f'usr/lib/modules/{self.new}/updates/vbios-override'
+        dkms = self.write(f'/usr/lib/modules/{self.new}/updates/dkms/nvidia.ko', json.dumps({'version': '615.78.08'}).encode())
+        # Both live under updates/; depmod's choice between them is not ours to rely on.
+        self.ops.selected_module = lambda kernel, name: str(managed / (name + '.ko') if managed.exists() else dkms)
+        self.ops.version = '615.78.08'
+        result = self.worker.reconcile(self.new)
+        self.assertEqual(result['state'], 'driver-drift')
+        self.assertFalse(managed.exists())
+        self.assertTrue((self.root / result['parked'][0].lstrip('/')).is_dir())
+        self.assertEqual(result['stock_module'], str(dkms))
+        normal = self.worker.boot.discover(self.new).entry_id
+        self.assertEqual(self.ops.environment['saved_entry'], normal)
+        self.assertEqual(result['entry'], normal)
+        self.assertEqual(result['normal_image'], 'clean')
+        for item in self.fleet()['boot_generations'][ready['entry']]['files']:
+            self.assertTrue((self.root / item['path'].lstrip('/')).exists())
+        self.assertEqual(self.fleet()['drift']['entry'], normal)
+        self.assertEqual(self.worker.guard_default(), normal)
+
+    def test_driver_drift_refuses_a_normal_image_with_the_old_nvidia_build(self):
+        self.setup_profile('grub')
+        ready = self.worker.reconcile(self.new)
+        self.write(f'/usr/lib/modules/{self.new}/updates/dkms/nvidia.ko', json.dumps({'version': '615.78.08'}).encode())
+        managed = self.root / f'usr/lib/modules/{self.new}/updates/vbios-override'
+        dkms = self.root / f'usr/lib/modules/{self.new}/updates/dkms/nvidia.ko'
+        self.ops.selected_module = lambda kernel, name: str(managed / (name + '.ko') if managed.exists() else dkms)
+        image = self.root / self.worker.boot.discover(self.new).initrd_path.lstrip('/')
+        stale = f'usr/lib/modules/{self.new}/updates/dkms/nvidia.ko.zst'
+        def normal_image(version):
+            atomic_write(image, json.dumps({stale: base64.b64encode(json.dumps({'version': version}).encode()).decode()}).encode())
+        normal_image(VERSION)
+        self.ops.version = '615.78.08'
+        result = self.worker.reconcile(self.new)
+        self.assertEqual((result['state'], result['normal_image'], result['boots_normal_driver']), ('driver-drift', 'mismatched', False))
+        self.assertEqual(self.ops.environment['saved_entry'], ready['entry'])
+        normal_image('615.78.08')
+        result = self.worker.reconcile(self.new)
+        normal = self.worker.boot.discover(self.new).entry_id
+        self.assertEqual((result['normal_image'], result['boots_normal_driver'], self.ops.environment['saved_entry']),
+                         ('matching', True, normal))
 
     def test_dry_run_does_not_create_state_or_boot_publication(self):
         self.setup_profile('systemd-boot')

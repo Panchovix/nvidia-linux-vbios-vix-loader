@@ -165,6 +165,19 @@ class ManualProviderTests(unittest.TestCase):
         self.assertNotIn("RPM", next(line for line in text.splitlines() if line.startswith("Description=")))
         self.assertEqual(text.encode(), (REPO / "packaging/systemd/nvidia-vbios-reconcile.path").read_bytes())
 
+    def test_reconcile_service_can_update_the_enrollment_in_every_unit_copy(self):
+        from nvidia_vbios.lifecycle import hook_templates
+        from nvidia_vbios.lifecycle.platform import ARCH_PLATFORM, DEBIAN_PLATFORM, FEDORA_PLATFORM
+        from nvidia_vbios.lifecycle.portable_hooks import SERVICE_TARGET, hook_templates_for
+        copies = [(REPO / "packaging/systemd/nvidia-vbios-reconcile.service").read_text(),
+                  hook_templates()["/usr/lib/systemd/system/nvidia-vbios-reconcile.service"]["data"].decode()]
+        copies += [hook_templates_for(platform, {"backend": "grub"})[SERVICE_TARGET]["data"].decode()
+                   for platform in (FEDORA_PLATFORM, DEBIAN_PLATFORM, ARCH_PLATFORM)]
+        for text in copies:
+            paths = next(line for line in text.splitlines() if line.startswith("ReadWritePaths=")).split("=", 1)[1].split()
+            self.assertIn("/etc/nvidia-vbios", paths)
+            self.assertIn("ProtectSystem=strict", text)
+
     def test_templates_load_from_a_zip_package_outside_the_checkout(self):
         import json
         import zipfile
@@ -348,6 +361,35 @@ class ManualProviderTests(unittest.TestCase):
             with self.assertRaisesRegex(LifecycleError, "parent RPM"):
                 self.operations.start_reconcile()
         self.operations._run.assert_not_called()
+
+    def test_synchronous_start_accepts_driver_drift_and_prints_resume_command(self):
+        import contextlib
+        import io
+        from nvidia_vbios.lifecycle.security import json_write
+        (self.root / "run/systemd/system").mkdir(parents=True)
+        status = {"state": "driver-drift", "marker": "VBIOS_DRIFT", "installed_driver": "615.78.08",
+                  "built_driver": "615.71.09", "resume": "nvbios system post-install --source PATH"}
+        json_write(self.root / f"var/lib/nvidia-vbios/lifecycle/status-{fixtures.NEW}.json", status)
+        self.operations._run = MagicMock(return_value=subprocess.CompletedProcess([], 0, b"", b""))
+        stderr = io.StringIO()
+        with patch("nvidia_vbios.lifecycle.system.Path", side_effect=lambda value: self.root / str(value).lstrip("/")), \
+             patch("nvidia_vbios.lifecycle.system.checked_path"), \
+             patch("nvidia_vbios.lifecycle.__main__.installed_kernels", return_value=[fixtures.OLD, fixtures.NEW]), \
+             contextlib.redirect_stderr(stderr):
+            self.assertEqual(self.operations.start_reconcile(), status)
+        self.assertIn("VBIOS_DRIFT: installed NVIDIA 615.78.08", stderr.getvalue())
+        self.assertIn("nvbios system post-install --source PATH", stderr.getvalue())
+        self.assertNotIn("boots the distribution driver", stderr.getvalue())
+        self.assertIn("has no NVIDIA 615.78.08 kernel module", stderr.getvalue())
+        self.operations._run.assert_called_once_with(["systemctl", "start", "nvidia-vbios-reconcile.service"], timeout=7200)
+        json_write(self.root / f"var/lib/nvidia-vbios/lifecycle/status-{fixtures.NEW}.json", dict(status, boots_normal_driver=True))
+        stderr = io.StringIO()
+        with patch("nvidia_vbios.lifecycle.system.Path", side_effect=lambda value: self.root / str(value).lstrip("/")), \
+             patch("nvidia_vbios.lifecycle.system.checked_path"), \
+             patch("nvidia_vbios.lifecycle.__main__.installed_kernels", return_value=[fixtures.OLD, fixtures.NEW]), \
+             contextlib.redirect_stderr(stderr):
+            self.operations.start_reconcile()
+        self.assertIn("the normal entry boots the distribution driver without the override", stderr.getvalue())
 
     def test_actual_akmods_unit_is_restarted_synchronously(self):
         (self.root / "run/systemd/system").mkdir(parents=True)

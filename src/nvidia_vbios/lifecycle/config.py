@@ -72,6 +72,8 @@ def load_config(path: Path, root: Path = Path("/"), *, require_enabled: bool = T
             raise LifecycleError("retain_boot_generations must be 2 or 3")
         if "require_p2p_source" in value and not isinstance(value["require_p2p_source"], bool):
             raise LifecycleError("require_p2p_source must be boolean")
+        if "auto_source" in value and not isinstance(value["auto_source"], bool):
+            raise LifecycleError("auto_source must be boolean")
         sources = value["sources"]
         if not isinstance(sources, list) or not sources:
             raise LifecycleError("driver source registry is empty")
@@ -185,6 +187,11 @@ def load_config(path: Path, root: Path = Path("/"), *, require_enabled: bool = T
         return Enrollment(value, digest(raw_bytes), tuple(devices), tuple(sources), fallback)
     except (KeyError, TypeError, ValueError) as exc:
         raise LifecycleError(f"malformed lifecycle configuration: {exc}") from exc
+
+
+def resume_command(raw: dict) -> str:
+    """The manual command that registers a matching source and rebuilds."""
+    return "nvbios system post-install --source PATH" + (" --p2p-preferred" if raw.get("require_p2p_source") else "")
 
 
 def select_source(config: Enrollment, version: str, inspect, root: Path) -> tuple[dict, dict]:

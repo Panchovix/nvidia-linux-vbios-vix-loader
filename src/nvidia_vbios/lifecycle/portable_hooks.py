@@ -105,7 +105,8 @@ def _boot_paths(boot):
 
 def _service(platform, boot):
     after = 'local-fs.target' + (' akmods.service' if platform.family == 'fedora' else '')
-    paths = ['/var/lib/nvidia-vbios', platform.module_root, '/usr/lib/firmware/nvidia', *_boot_paths(boot)]
+    # /etc/nvidia-vbios: automatic source registration updates the enrollment.
+    paths = ['/var/lib/nvidia-vbios', '/etc/nvidia-vbios', platform.module_root, '/usr/lib/firmware/nvidia', *_boot_paths(boot)]
     if platform.package_provider == 'rpm':
         paths.extend(['-/usr/lib/sysimage/rpm', '-/var/lib/rpm'])
         if platform.family == 'fedora':

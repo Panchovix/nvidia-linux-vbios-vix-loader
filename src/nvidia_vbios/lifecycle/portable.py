@@ -163,7 +163,38 @@ class PortableReconciler(Reconciler):
     def _normal_entry_id(self, kernel, config):
         return self.boot.discover(kernel).entry_id
 
+    def _drift_normal(self, config, kernel):
+        return self.boot.discover(kernel).entry_id
+
+    def _saved_normal_kernel(self, config, saved):
+        from .__main__ import kernel_key
+        found = []
+        for kernel in self.boot.installed_kernels():
+            try:
+                if self.boot.discover(kernel).entry_id == saved:
+                    found.append(kernel)
+            except LifecycleError:
+                continue
+        return max(found, key=kernel_key) if found and saved else None
+
+    def _normal_image_state(self, config, kernel, version):
+        from . import initramfs
+        try:
+            image = self.path(self.boot.discover(kernel).initrd_path)
+            self.trusted(image)
+            if hasattr(self.ops, 'portable_extract'):
+                names = self.ops.portable_members(image)
+                read = lambda name: self.ops.portable_extract(image, [name])[name]
+            else:
+                names = initramfs.list_members(self.ops, image, config=config.raw)
+                read = lambda name: initramfs.extract(self.ops, image, [name], self.state, config=config.raw)[name]
+            return self._image_modules_state(kernel, version, names, read)
+        except (LifecycleError, OSError, ValueError):
+            return 'unknown'
+
     def _guard_default(self, config, fleet):
+        if fleet.get('drift'):
+            return self._guard_drift(config, fleet)
         normal = self._fallback(config, fleet)
         last = fleet.get('last_ready')
         target = last['entry'] if last else normal['entry']
@@ -177,13 +208,8 @@ class PortableReconciler(Reconciler):
         eligible = not last and saved == config.fallback_entry
         if last:
             from .__main__ import kernel_key
-            for kernel in self.boot.installed_kernels():
-                try:
-                    candidate = self.boot.discover(kernel)
-                except LifecycleError:
-                    continue
-                if candidate.entry_id == saved and kernel_key(kernel) > kernel_key(last['kernel']):
-                    eligible = True
+            candidate = self._saved_normal_kernel(config, saved)
+            eligible = bool(candidate) and kernel_key(candidate) > kernel_key(last['kernel'])
         if not eligible:
             raise LifecycleError('foreign or unrelated boot default preserved')
         self.ops.set_default(target)

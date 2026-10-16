@@ -16,6 +16,10 @@ class LifecycleError(RuntimeError):
     """A prerequisite or transaction failed; no ready boot was selected."""
 
 
+class LockBusy(LifecycleError):
+    """Another owner holds a coordination lock; the timer or path unit retries."""
+
+
 def token(value: str, label: str = "kernel") -> str:
     if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.+-]+", value) or value in (".", ".."):
         raise LifecycleError(f"invalid {label}")
@@ -128,7 +132,7 @@ def locked(path: Path, boundary: Path, *, rpm: bool = False, akmods: bool = Fals
         try:
             function(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise LifecycleError(f"update/build lock busy: {path}; timer will retry") from None
+            raise LockBusy(f"update/build lock busy: {path}; timer will retry") from None
         named = os.stat(path, follow_symlinks=False)
         if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
             raise LifecycleError("coordination lock inode changed before acquisition")

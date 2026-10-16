@@ -22,10 +22,19 @@ Este repositorio solo la carga.
 | --- | --- |
 | Fedora 43, GRUB/BLS, dracut, DNF5, módulos abiertos NVIDIA 615.x instalados con el instalador `.run` | **Soportado**: usado en hardware real |
 | Familia RHEL, Debian/Ubuntu, Arch/CachyOS/EndeavourOS, systemd-boot, UKI, Secure Boot (todos con el driver `.run`) | **Experimental**: solo pruebas sintéticas y en contenedores |
-| Drivers NVIDIA instalados con un gestor de paquetes (RPM Fusion, pacman, apt, ...), rpm-ostree, módulos de kernel propietarios de NVIDIA, drivers anteriores a 615 | No soportado |
+| Drivers NVIDIA de un gestor de paquetes (RPM Fusion, repositorios de NVIDIA, apt, pacman), módulos abiertos 615+ | **Experimental**: solo pruebas sintéticas |
+| rpm-ostree, módulos de kernel propietarios de NVIDIA, drivers anteriores a 615 | No soportado |
 
-**Solo se soportan drivers instalados con el instalador `.run` de NVIDIA.** Una actualización del driver hecha
-por un gestor de paquetes todavía no se maneja de forma segura.
+Tras una actualización del driver con un gestor de paquetes, el loader descarga una vez el tag correspondiente de
+github.com/NVIDIA/open-gpu-kernel-modules, lo compara con la copia del código de la distribución cuando reconoce el
+formato del paquete y recompila. Los repositorios de NVIDIA y Arch instalan el árbol completo, que se compara entero.
+RPM Fusion y Ubuntu instalan solo kernel-open, así que los Makefile de nivel superior y `src/` del tag se confían solo
+por el TLS de GitHub (`cross_check: kernel-open-only` en `nvbios system status`).
+Sin red, con un perfil P2P o ante cualquier diferencia, aparta sus módulos y selecciona la entrada normal más nueva
+cuyo módulo NVIDIA propio (de la distribución) se compiló para la nueva versión y cuya imagen de arranque no carga otra
+versión de NVIDIA; arranca sin override. Si no hay ninguna, la entrada anterior sigue como predeterminada.
+`nvbios system status` muestra el comando post-install.
+`--no-auto-source` (en `prepare`) desactiva la descarga.
 
 Probado funcionando en: RTX PRO 6000 Blackwell Max-Q, RTX PRO 6000 Blackwell Workstation Edition, GeForce RTX
 5090, 5080, 5070 Ti, 5070, 5060 Ti y RTX 2000 Ada.
@@ -78,8 +87,8 @@ Ejecuta esto desde un clon de este repositorio.
    sudo ./nvbios system devices
    ```
 
-2. Prepara un perfil, con un `--device` por GPU (`--userspace manual` corresponde al driver instalado con `.run`).
-   Este paso solo escribe el directorio de salida.
+2. Prepara un perfil, con un `--device` por GPU (`--userspace manual` para el driver instalado con `.run`; `rpm`,
+   `deb` o `pacman` para un driver de gestor de paquetes). Este paso solo escribe el directorio de salida.
 
    ```sh
    sudo ./nvbios system prepare \
@@ -144,6 +153,10 @@ amplía el límite del runtime o módulo que ya tenías instalado.
   Ejecuta `post-install` **antes de reiniciar**. Mientras tanto, los módulos compilados para el driver anterior tienen
   prioridad en todas las entradas de arranque, incluida la normal, y el driver NVIDIA no arrancará. Si ya
   reiniciaste, ejecuta `post-install` desde ese arranque; funciona aunque `nvidia-smi` falle.
+- **Driver** (gestor de paquetes, experimental): no hay que ejecutar nada. El hook de paquetes descarga el código
+  fuente correspondiente y recompila durante la actualización (ver Estado). Revisa `sudo nvbios system status`
+  antes de reiniciar: si no pudo recompilar, queda como predeterminada una entrada normal con el módulo nuevo de la
+  distribución (o la anterior, si no hay ninguna) y `status` muestra el comando `post-install`.
 
 ## Si algo sale mal
 

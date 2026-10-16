@@ -22,10 +22,19 @@ This repository only loads it.
 | --- | --- |
 | Fedora 43, GRUB/BLS, dracut, DNF5, NVIDIA 615.x open kernel modules installed with the `.run` installer | **Supported**: used on real hardware |
 | RHEL family, Debian/Ubuntu, Arch/CachyOS/EndeavourOS, systemd-boot, UKI, Secure Boot (all with the `.run` driver) | **Experimental**: synthetic and container tests only |
-| NVIDIA drivers installed with a package manager (RPM Fusion, pacman, apt, ...), rpm-ostree, proprietary NVIDIA kernel modules, drivers older than 615 | Not supported |
+| NVIDIA drivers from a package manager (RPM Fusion, NVIDIA repos, apt, pacman), open kernel modules 615+ | **Experimental**: synthetic tests only |
+| rpm-ostree, proprietary NVIDIA kernel modules, drivers older than 615 | Not supported |
 
-**Only drivers installed with NVIDIA's `.run` installer are supported.** A driver upgrade done by a package manager
-is not handled safely yet.
+After a package-manager driver upgrade the loader downloads the matching tag from github.com/NVIDIA/open-gpu-kernel-modules
+once, compares it with the distribution's own copy of the source when it recognises the package layout, and rebuilds.
+NVIDIA's repositories and Arch install the whole tree, which is compared whole. RPM Fusion and Ubuntu install only
+kernel-open, so the tag's top-level Makefiles and `src/` are trusted on GitHub's TLS alone
+(`cross_check: kernel-open-only` in `nvbios system status`).
+Offline, with a P2P profile, or on any mismatch, it moves its modules aside and selects the newest normal entry whose
+own NVIDIA module (from the distribution) was built for the new version, and whose boot image does not load another
+NVIDIA build; it boots without the override. If there is none, the previous entry stays the default.
+`nvbios system status` shows the post-install command.
+`--no-auto-source` (on `prepare`) turns off the download.
 
 Tested working on: RTX PRO 6000 Blackwell Max-Q, RTX PRO 6000 Blackwell Workstation Edition, GeForce RTX 5090,
 5080, 5070 Ti, 5070, 5060 Ti and RTX 2000 Ada.
@@ -77,8 +86,8 @@ Run these from a clone of this repository.
    sudo ./nvbios system devices
    ```
 
-2. Prepare a profile, with one `--device` per GPU (`--userspace manual` means the `.run` driver install). This
-   step only writes the output directory.
+2. Prepare a profile, with one `--device` per GPU (`--userspace manual` for the `.run` driver; `rpm`, `deb` or
+   `pacman` for a package-manager driver). This step only writes the output directory.
 
    ```sh
    sudo ./nvbios system prepare \
@@ -142,6 +151,10 @@ expanded GPU count merely by downloading this repository.
   Run `post-install` **before rebooting**. Until then the modules built for the previous driver take priority in
   every boot entry, including the normal one, so the NVIDIA driver will not start. If you already rebooted, run
   `post-install` from that boot; it works even while `nvidia-smi` fails.
+- **Driver updates** (package manager, experimental): nothing to run. The package hook downloads the matching
+  source and rebuilds during the upgrade (see Status). Check `sudo nvbios system status` before rebooting: if it
+  could not rebuild, a normal entry with the distribution's new module is the default (or the previous entry, if
+  there is none) and `status` shows the `post-install` command.
 
 ## If something goes wrong
 

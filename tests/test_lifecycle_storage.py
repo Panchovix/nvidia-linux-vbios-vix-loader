@@ -23,21 +23,22 @@ class StorageTests(unittest.TestCase):
         ready=self.worker.reconcile(fixtures.NEW)
         status_path=self.worker.state/f'status-{fixtures.NEW}.json'
         saved=status_path.read_bytes(); images=set((self.f.root/'boot').glob('*vbios*.img'))
-        for failure in ('headers','uuid','userspace','pending'):
+        # A changed userspace version with READY is driver drift, not a transient
+        # failure: test_lifecycle covers its fail-safe.
+        for failure in ('headers','uuid','pending'):
             with self.subTest(failure=failure):
                 def inventory():
                     return {d['bdf']:dict(d,uuid=None) for d in self.f.config['devices']}
                 from contextlib import nullcontext
                 guard=patch.object(self.ops,'inventory',side_effect=inventory) if failure=='uuid' else nullcontext()
                 self.ops.fault='headers' if failure=='headers' else None
-                self.ops.version='615.99.01' if failure=='userspace' else fixtures.VERSION
                 if failure=='pending':self.ops.environment['next_entry']='foreign-one-shot'
                 with guard,self.assertRaises(LifecycleError):self.worker.reconcile(fixtures.NEW)
                 self.assertEqual(status_path.read_bytes(),saved)
                 self.assertEqual(self.attempt()['state'],'blocked')
                 self.assertTrue(self.attempt()['preserved_ready'])
                 self.assertEqual(self.ops.builds,1)
-                self.ops.fault=None;self.ops.version=fixtures.VERSION;self.ops.environment.pop('next_entry',None)
+                self.ops.fault=None;self.ops.environment.pop('next_entry',None)
                 self.assertEqual(self.worker.reconcile(fixtures.NEW)['entry'],ready['entry'])
                 self.assertEqual(self.ops.builds,1)
                 self.assertTrue(self.attempt()['reused'])

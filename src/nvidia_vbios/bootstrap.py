@@ -587,7 +587,8 @@ class Bootstrap:
                          'jobs': profile.get('jobs', 1), 'bls': profile.get('bls', {})}
         if normal_boot is not None:
             configuration.update(boot=profile['boot'], normal_boot=normal_boot)
-        for name in ('seed_previous_ready', 'adopt_existing', 'parameters', 'signing', 'retain_build_tree', 'require_p2p_source', 'stock_builder', 'retain_boot_generations'):
+        for name in ('seed_previous_ready', 'adopt_existing', 'parameters', 'signing', 'retain_build_tree', 'require_p2p_source',
+                     'stock_builder', 'retain_boot_generations', 'auto_source'):
             if name in profile:
                 configuration[name] = profile[name]
         # Validate the complete config grammar in disposable scratch, before any publication.
@@ -1090,6 +1091,8 @@ class Bootstrap:
         return {'schema_version': 1, 'installed': valid, 'enrolled': enrolled, 'ready': ready,
                 'ready_scope': 'prepared-files-only', 'running_kernel': running_kernel,
                 'last_attempt': self._read(STATE + f'/attempt-{token(running_kernel)}.json'),
+                'driver_drift': self._read(STATE + '/fleet.json').get('drift'),
+                'source_fetch': self._read(STATE + '/source-fetch.json'),
                 'runtime': self._runtime_status(running_kernel),
                 'triggers_enabled': self.path(ENABLED).exists() and self.ops.triggers_enabled(),
                 'release': installed.get('release'), 'migration': self._read(BASE + '/migration.json'),

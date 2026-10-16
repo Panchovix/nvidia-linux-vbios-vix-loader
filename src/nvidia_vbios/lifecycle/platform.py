@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 import shlex
 import stat
-from .security import LifecycleError, checked_path, locked
+from .security import LifecycleError, LockBusy, checked_path, locked
 
 
 @dataclass(frozen=True)
@@ -82,7 +82,7 @@ def pacman_locked(root: Path):
     try:
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
     except FileExistsError:
-        raise LifecycleError(f"update/build lock busy: {path}; timer will retry") from None
+        raise LockBusy(f"update/build lock busy: {path}; timer will retry") from None
     opened = os.fstat(fd)
     try:
         os.write(fd, (str(os.getpid()) + "\n").encode())

@@ -9,17 +9,28 @@ import shutil
 import tempfile
 import time
 from ..limits import REGISTRY_STRING_MAX_BYTES
-from .config import load_config, select_source
-from .security import LifecycleError, atomic_write, checked_path, digest, hash_file, json_write, locked, token, exchange_directory
+from .config import load_config, resume_command, select_source
+from .security import (LifecycleError, LockBusy, atomic_write, checked_path, digest, hash_file, json_write, locked,
+                       token, exchange_directory)
 
 STATE = "/var/lib/nvidia-vbios/lifecycle"
 CONFIG = "/etc/nvidia-vbios/lifecycle.json"
 MODULES = ("nvidia.ko", "nvidia-modeset.ko", "nvidia-drm.ko", "nvidia-uvm.ko")
+# Any build of the NVIDIA modules an image can early-load (Debian names them nvidia-current*).
+NVIDIA_MODULE = r"nvidia(?:-current)?(?:-(?:modeset|drm|uvm|peermem))?\.ko(?:\.(?:xz|gz|zst))?"
+BOOTABLE_IMAGES = ("clean", "matching")
 ACTIVATION_PATH = "etc/modprobe.d/zz-vbios-override-test.conf"
 FORCE_PATH = "etc/cmdline.d/20-force_drivers.conf"
 FORCE_BYTES = b"rd.driver.pre=nvidia\n"
 MODULE_STRING_MAX_BYTES = REGISTRY_STRING_MAX_BYTES
 ACTIVATION_GENERATION = 4
+
+
+def regenerate_command(raw, kernel):
+    """The distribution command that rebuilds the normal initramfs of `kernel`."""
+    builder = raw.get("boot", {}).get("initramfs", "dracut")
+    return {"initramfs-tools": f"update-initramfs -u -k {kernel}", "mkinitcpio": "mkinitcpio -P"}.get(
+        builder, f"dracut -f --kver {kernel}")
 
 
 def firmware_filename(device):
@@ -279,7 +290,60 @@ class Reconciler:
             if "$" in re.sub(pattern, "", value):
                 raise LifecycleError(f"invalid GRUB option variable syntax in {name}")
 
+    def _saved_normal_kernel(self, config, saved):
+        """Kernel of the conventional normal entry `saved` on this installation, else None."""
+        if not isinstance(saved, str):
+            return None
+        try:
+            token(saved, "saved entry")
+            path = self.path(f"/boot/loader/entries/{saved}.conf")
+            self.trusted(path)
+            kernel, _ = parse_bls(path.read_bytes(), **self._bls_options(config))
+            return kernel if path == self._base_entry(kernel, config) else None
+        except (LifecycleError, OSError):
+            return None
+
+    def _drift_normal(self, config, kernel):
+        """The normal entry for `kernel`, only when its kernel and initramfs are present."""
+        entry = self._base_entry(kernel, config)
+        for name in (f"/boot/vmlinuz-{kernel}", f"/boot/initramfs-{kernel}.img"):
+            if not self.trusted(self.path(name)).is_file():
+                raise LifecycleError(f"normal boot file missing: {name}")
+        return entry.stem
+
+    @staticmethod
+    def _managed_entries(fleet):
+        return {entry for entry in (fleet.get("last_ready", {}).get("entry"),
+                                    *(record.get("entry") for record in fleet.get("kernels", {}).values())) if entry}
+
+    def _guard_drift(self, config, fleet):
+        """Driver drift: a normal entry at least as new as the drift kernel is the safe default."""
+        from .__main__ import kernel_key
+        drift = fleet["drift"]
+        environment = self.ops.grub_environment()
+        if environment.get("next_entry") or environment.get("prev_saved_entry"):
+            raise LifecycleError("another boot transition is pending; refusing to change boot selection")
+        self._check_option_variables(config, environment)
+        saved = environment.get("saved_entry")
+        kernel = self._saved_normal_kernel(config, saved)
+        if (saved and saved == drift.get("entry")) or (kernel and kernel_key(kernel) >= kernel_key(drift["kernel"])):
+            return saved
+        managed = self._managed_entries(fleet)
+        if saved not in managed:
+            raise LifecycleError("foreign or unrelated boot default preserved; explicit selection required")
+        target = drift.get("entry")
+        if not target:
+            return saved
+        if target not in managed and self._drift_normal(config, drift["kernel"]) != target:
+            raise LifecycleError("driver-drift normal entry changed; explicit selection required")
+        self.ops.set_default(target)
+        if self.ops.grub_environment().get("saved_entry") != target:
+            raise LifecycleError("could not select the driver-drift boot entry")
+        return target
+
     def _guard_default(self, config, fleet):
+        if fleet.get("drift"):
+            return self._guard_drift(config, fleet)
         last = fleet.get("last_ready")
         if last:
             for record in last["boot_files"]:
@@ -300,17 +364,7 @@ class Reconciler:
         # Recognize an actual normal entry on this installation as an update
         # candidate. A different OS, legacy entry not explicitly seeded, older
         # managed entry, or deliberate same-kernel normal choice is preserved.
-        candidate = None
-        if isinstance(saved, str):
-            try:
-                token(saved, "saved entry")
-                path = self.path(f"/boot/loader/entries/{saved}.conf")
-                self.trusted(path)
-                candidate, _ = parse_bls(path.read_bytes(), **self._bls_options(config))
-                if path != self._base_entry(candidate, config):
-                    candidate = None
-            except (LifecycleError, OSError):
-                candidate = None
+        candidate = self._saved_normal_kernel(config, saved)
         eligible = not last and saved == config.fallback_entry
         if last and candidate:
             from .__main__ import kernel_key
@@ -793,6 +847,186 @@ class Reconciler:
         except (LifecycleError, OSError, KeyError, TypeError, ValueError):
             return False
 
+    def _image_modules_state(self, kernel, version, names, read):
+        """What an image early-loads for `kernel`, from its full member list.
+
+        clean: no NVIDIA module; matching: every one reports `version`;
+        contains-override: our module; mismatched: another version or none.
+        """
+        pattern = re.compile(rf"(?:usr/)?lib/modules/{re.escape(kernel)}/(?:[^/]+/)*{NVIDIA_MODULE}")
+        found = sorted({name for name in names if pattern.fullmatch(name)})
+        if any("/updates/vbios-override/" in name for name in found):
+            return "contains-override"
+        with tempfile.TemporaryDirectory(prefix=".vbios-image-", dir=self.state) as work:
+            for index, name in enumerate(found):
+                data = read(name)
+                if not data:
+                    raise LifecycleError(f"cannot read {name} from the normal initramfs")
+                module = Path(work) / f"{index}-{Path(name).name}"
+                module.write_bytes(data)
+                if self.ops.modinfo(module).get("version") != version:
+                    return "mismatched"
+        return "matching" if found else "clean"
+
+    def _normal_image_state(self, config, kernel, version):
+        """State of the normal initramfs (see _image_modules_state); unknown when it cannot be read."""
+        try:
+            image = self.path(f"/boot/initramfs-{kernel}.img")
+            self.trusted(image)
+            return self._image_modules_state(kernel, version, self.ops.initramfs_members(image),
+                                             lambda name: self.ops.extract(image, name))
+        except (LifecycleError, OSError, ValueError):
+            return "unknown"
+
+    def _drift_version(self, config):
+        """Installed userspace version when it differs from the last READY build, else None."""
+        last = self._effective_fleet(config).get("last_ready")
+        if not last:
+            return None
+        version = self.ops.installed_version(config.raw)
+        return version if version != last["version"] else None
+
+    def _park_despite(self, config, refusal):
+        """A refused normal default (a deliberate user choice) still loads our old modules under drift."""
+        try:
+            return (not isinstance(refusal, LockBusy) and self._drift_version(config) is not None
+                    and self._saved_normal_kernel(config, self.ops.grub_environment().get("saved_entry")) is not None)
+        except (LifecycleError, OSError):
+            return False
+
+    def _stock_module(self, kernel, parked):
+        """(path, version) of the nvidia.ko depmod selects for `kernel`; "missing" without one."""
+        try:
+            stock = str(self.ops.selected_module(kernel, "nvidia"))
+        except LifecycleError:
+            return "missing", None
+        chosen = Path(stock).resolve()
+        if any(chosen.is_relative_to(self.path(path).resolve()) for path in
+               (f"/usr/lib/modules/{kernel}/updates/vbios-override", *(record["path"] for record in parked))):
+            raise LifecycleError("depmod still selects the override modules")
+        try:
+            return stock, self.ops.modinfo(Path(stock)).get("version")
+        except (LifecycleError, OSError, ValueError):
+            return stock, None
+
+    def _fail_safe_locked(self, config, kernel, version, error):
+        """Installed driver no longer matches the built one and no usable source exists.
+
+        Park our modules for every kernel with a normal entry, let depmod select
+        the distribution's own, and make the newest normal entry whose module is
+        the installed driver the default; without one the default stays.
+        Idempotent. No journal: a rollback would restore the old modules. Caller
+        holds reconcile.lock and the package locks.
+        """
+        raw = self._json(self.state / "fleet.json")
+        fleet = self._effective_fleet(config)
+        # The normal entry an earlier fail-safe selected is ours to move to a newer kernel.
+        managed = self._managed_entries(fleet) | {(fleet.get("drift") or {}).get("entry")} - {None}
+        normal = self._drift_normal(config, kernel)
+        normals = {kernel: normal}
+        for each in fleet.get("kernels", {}):
+            try:
+                normals.setdefault(each, self._drift_normal(config, each))
+            except LifecycleError:
+                continue  # removed kernel: no normal entry loads its modules
+        image = self._normal_image_state(config, kernel, version)
+        environment = self.ops.grub_environment()
+        current = environment.get("saved_entry")
+        drift = dict(fleet.get("drift") or {"kernel": kernel}, version=version)
+        parked = list(drift.get("parked", []))
+        # Any normal entry, the newest kernel's or one the user chose, loads these over the distribution's.
+        for each in sorted(normals):
+            relative = f"/usr/lib/modules/{each}/updates/vbios-override"
+            directory = self.path(relative)
+            self.trusted(directory, missing=True)
+            if not directory.exists():
+                continue
+            expected = {Path(record["path"]).name: record["after_sha256"]
+                        for record in fleet.get("kernels", {}).get(each, {}).get("deployment", [])
+                        if record["path"].startswith(relative + "/")}
+            members = list(directory.iterdir())
+            for member in members:
+                self.trusted(member)
+            actual = {member.name: hash_file(member) for member in members if member.is_file()}
+            # nvidia-installer (.run) moves every nvidia*.ko of the running kernel away,
+            # ours included: park what is left of the deployment, refuse anything else.
+            if len(actual) != len(members) or any(expected.get(name) != sha for name, sha in actual.items()):
+                raise LifecycleError(f"override module directory of {each} differs from the committed deployment; not parked")
+            if actual:
+                # Outside {kernel}/: depmod also scans dot-directories inside it.
+                destination = self.path(f"/usr/lib/modules/.vbios-parked-{each}-{time.time_ns()}")
+                self.trusted(destination, missing=True)
+                parked.append({"kernel": each, "path": "/" + str(destination.relative_to(self.root)), "files": actual})
+                drift["parked"] = parked
+                json_write(self.state / "fleet.json", dict(raw, drift=drift))
+                os.rename(directory, destination)
+                if each != kernel:
+                    self.ops.depmod(each)
+        self.ops.depmod(kernel)
+        stock, stock_version = self._stock_module(kernel, parked)
+        if image == "contains-override":
+            # A normal image that early-loads our module mismatches userspace just the same: keep
+            # the default and the modules parked so that a regenerated image takes the distribution's.
+            json_write(self.state / "fleet.json", dict(raw, drift=dict(drift, parked=parked, kernel=kernel, entry=current)))
+            raise LifecycleError(f"the normal initramfs of {kernel} embeds the override module, so every entry loads "
+                                 f"the old driver; regenerate it with `{regenerate_command(config.raw, kernel)}`")
+        # Without a normal entry that loads the installed driver the default stays: the old
+        # READY image still loads a module, so post-install can read the GPU identity.
+        # The image is checked too: it may early-load another NVIDIA build.
+        from .__main__ import kernel_key
+        choice = next(((each, entry) for each, entry in sorted(normals.items(), key=lambda item: kernel_key(item[0]), reverse=True)
+                       if self._stock_module(each, parked)[1] == version
+                       and self._normal_image_state(config, each, version) in BOOTABLE_IMAGES), None)
+        if choice:
+            drift.update(kernel=choice[0], entry=choice[1])
+            if (current != choice[1] and current in managed
+                    and not environment.get("next_entry") and not environment.get("prev_saved_entry")):
+                self._check_option_variables(config, environment)
+                self.ops.set_default(choice[1])
+                current = self.ops.grub_environment().get("saved_entry")
+                if current != choice[1]:
+                    raise LifecycleError("could not select the normal boot entry")
+        elif current in managed:
+            drift.update(kernel=self._saved_normal_kernel(config, current) or kernel, entry=current)
+        drift["parked"] = parked
+        json_write(self.state / "fleet.json", dict(raw, drift=drift))
+        # Report what the default loads: a user-chosen normal entry may be another kernel's.
+        shown = self._saved_normal_kernel(config, current)
+        shown_image = image
+        if shown and shown != kernel:
+            stock, stock_version = self._stock_module(shown, parked)
+            shown_image = self._normal_image_state(config, shown, version)
+        return {"state": "driver-drift", "marker": "VBIOS_DRIFT", "kernel": kernel,
+                "installed_driver": version, "built_driver": fleet["last_ready"]["version"],
+                "entry": current, "parked": [record["path"] for record in parked], "stock_module": stock,
+                "stock_module_version": stock_version,
+                # akmods/DKMS may have failed, or a .run was installed without kernel modules.
+                "boots_normal_driver": shown is not None and stock_version == version and shown_image in BOOTABLE_IMAGES,
+                "normal_image": image, "error": str(error), "resume": resume_command(config.raw),
+                "finished": time.time()}
+
+    def _remove_parked(self, drift):
+        """After a new READY commit, delete parked modules that are still byte-identical."""
+        warnings = []
+        for record in drift.get("parked", []):
+            try:
+                path = self.path(record["path"])
+                if path.parent != self.path("/usr/lib/modules") or not path.name.startswith(".vbios-parked-"):
+                    raise LifecycleError("invalid parked module path")
+                if not path.exists():
+                    continue
+                self.trusted(path)
+                members = list(path.iterdir())
+                for member in members:
+                    self.trusted(member)
+                if {member.name: hash_file(member) for member in members if member.is_file()} != record["files"] \
+                        or len(members) != len(record["files"]):
+                    raise LifecycleError("parked modules changed; left in place")
+                shutil.rmtree(path)
+            except (LifecycleError, OSError, KeyError, TypeError) as exc:
+                warnings.append(f"{record.get('path') if isinstance(record, dict) else record}: {exc}")
+        return warnings
+
     def reconcile(self, kernel, *, dry_run=False):
         if dry_run:
             return self.dry_run(kernel)
@@ -801,9 +1035,12 @@ class Reconciler:
         self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
         status_path = self.state / f"status-{kernel}.json"
         journal = None
+        rollback_error = None
+        prepared = None
         existing = {}
         attempt_path = self.state / f"attempt-{kernel}.json"
         owns_lock = False
+        package_locks = False
         profile_disabled = False
         with ExitStack() as locks:
             try:
@@ -820,8 +1057,14 @@ class Reconciler:
                     raise LifecycleError("lifecycle profile is disabled; committed readiness preserved")
                 fleet = self._effective_fleet(config)
                 old = self._json(self.state / "transaction.json")
+                refused = None
                 if old.get("phase") not in ("installing", "selecting", "rollback-failed"):
-                    self._guard_default(config, fleet)
+                    try:
+                        self._guard_default(config, fleet)
+                    except LifecycleError as problem:
+                        if not self._park_despite(config, problem):
+                            raise
+                        refused = problem
                 # A callback cannot wait for its own parent RPM transaction.
                 # Probe and release first, before synchronous systemctl/akmods.
                 if hasattr(self.ops, "publication_locks"):
@@ -834,6 +1077,9 @@ class Reconciler:
                     self.ops.coordinate_akmods(kernel, config.raw)
                     locks.enter_context(locked(self.path("/run/akmods/akmods.lock"), self.root, akmods=True))
                     locks.enter_context(locked(self.path("/usr/lib/sysimage/rpm/.rpm.lock"), self.root, rpm=True))
+                package_locks = True
+                if refused:
+                    raise refused  # the handler below parks our modules; the default stays
                 if old.get("phase") in ("installing", "selecting", "rollback-failed"):
                     # fleet.json is the commit record. A crash after publishing it must
                     # retain the committed artifacts rather than roll them back.
@@ -845,7 +1091,11 @@ class Reconciler:
                         old["phase"] = "ready"
                         json_write(self.state / "transaction.json", old)
                     else:
-                        self._rollback(old)
+                        try:
+                            self._rollback(old)
+                        except Exception as problem:
+                            rollback_error = str(problem)  # no fail-safe below: the journal needs review
+                            raise LifecycleError("the interrupted transaction could not be rolled back") from problem
                 previous = self._guard_default(config, fleet)
                 # Save the prior committed boot pair before a same-kernel update
                 # replaces its fleet slot. Failure only disables this optional cleanup.
@@ -963,6 +1213,7 @@ class Reconciler:
                     normal_fallback=boot_publication["normal_fallback"],
                     last_ready={"entry": plan["entry"], "kernel": kernel, "version": plan["version"],
                                 "boot_files": boot_publication["boot_files"]})
+                drift = fleet.pop("drift", None)
                 self._record_boot_publication(fleet, plan, boot_publication, deployment)
                 json_write(self.state / "fleet.json", fleet)
                 journal["phase"] = "ready"
@@ -984,6 +1235,8 @@ class Reconciler:
                     except (LifecycleError, OSError) as problem:
                         status.setdefault("cleanup_warnings", []).append(str(problem))
                 status.setdefault("cleanup_warnings", []).extend(self._prune_removed_kernels())
+                if drift:
+                    status["cleanup_warnings"].extend(self._remove_parked(drift))
                 if not status["cleanup_warnings"]:
                     status.pop("cleanup_warnings")
                 self._retain_boots(status, config)
@@ -997,7 +1250,6 @@ class Reconciler:
                     # its committed status/recovery. Even writing
                     # "blocked" here would corrupt that owner's active result.
                     raise LifecycleError(str(exc)) from exc
-                rollback_error = None
                 if journal and journal.get("phase") != "ready":
                     # A durable fleet commit takes precedence over a later status-write error.
                     committed = self._json(self.state / "fleet.json").get("transaction_id") == journal.get("id")
@@ -1011,11 +1263,33 @@ class Reconciler:
                         rollback_error = str(problem)
                         journal["phase"] = "rollback-failed"
                         json_write(self.state / "transaction.json", journal)
+                if prepared is not None and prepared.exists() and config.raw.get("retain_build_tree") is not True:
+                    # Keep build.log and the manifest; a retried failure must not pile up source copies.
+                    try:
+                        self.trusted(prepared)
+                        shutil.rmtree(prepared)
+                    except (LifecycleError, OSError):
+                        pass
+                fail_safe_error = None
+                if package_locks and rollback_error is None and not isinstance(exc, LockBusy):
+                    # Only after a clean rollback and with the package locks held.
+                    try:
+                        installed = self._drift_version(config)
+                        if installed:
+                            result = self._fail_safe_locked(config, kernel, installed, exc)
+                            json_write(status_path, result)
+                            json_write(attempt_path, result)
+                            return result
+                    except Exception as problem:
+                        fail_safe_error = str(problem)
                 status = {"state": "blocked", "marker": "VBIOS_BLOCKED", "kernel": kernel,
                           "error": str(exc), "rollback_error": rollback_error, "finished": time.time()}
+                if fail_safe_error:
+                    status["fail_safe_error"] = fail_safe_error
                 preserved = journal is None and self._ready_artifacts_intact(existing, kernel)
                 json_write(attempt_path, dict(status, preserved_ready=preserved,
                                              previous_ready=existing.get("entry") if preserved else None))
                 if not preserved:
                     json_write(status_path, status)
-                raise LifecycleError(f"{exc}" + (f"; rollback requires review: {rollback_error}" if rollback_error else "")) from exc
+                raise LifecycleError(f"{exc}" + (f"; rollback requires review: {rollback_error}" if rollback_error else "")
+                                     + (f"; fail-safe: {fail_safe_error}" if fail_safe_error else "")) from exc

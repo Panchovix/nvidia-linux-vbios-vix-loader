@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 import subprocess
 import signal
+import sys
 import time
 from .security import LifecycleError, checked_path, resolve_trusted_file, locked, token
 from .platform import FEDORA_PLATFORM, detect_platform, package_transaction_lock
@@ -212,7 +213,9 @@ class SystemOperations:
         if provider["provider"] != self.platform.package_provider or owner.returncode:
             raise LifecycleError(f"NVIDIA userspace is not {label}-owned; explicit trusted manual provider required")
         versions = set(owner.stdout.decode().strip().splitlines())
-        if len(versions) != 1 or not re.fullmatch(r"\d+\.\d+\.\d+", next(iter(versions))):
+        # Two-part releases (575.64) are detected; the source registry stays
+        # three-part, so they reach the driver-drift fail-safe.
+        if len(versions) != 1 or not re.fullmatch(r"\d+\.\d+(?:\.\d+)?", next(iter(versions))):
             raise LifecycleError(f"ambiguous installed NVIDIA userspace {label} version")
         version = next(iter(versions))
         if any(candidate != version for _, candidate in packages):
@@ -221,7 +224,7 @@ class SystemOperations:
 
     @staticmethod
     def _upstream_version(value):
-        match = re.fullmatch(r"(?:[0-9]+:)?([0-9]+\.[0-9]+\.[0-9]+)(?:[-+~][A-Za-z0-9.+~:-]+)?", value)
+        match = re.fullmatch(r"(?:[0-9]+:)?([0-9]+\.[0-9]+(?:\.[0-9]+)?)(?:[-+~][A-Za-z0-9.+~:-]+)?", value)
         if not match:
             raise LifecycleError("NVIDIA package lacks one full upstream version")
         return match[1]
@@ -494,6 +497,13 @@ class SystemOperations:
         result = self._run(["lsinitrd", "--file", member, image], allow_failure=True)
         return result.stdout if result.returncode == 0 else None
 
+    def initramfs_members(self, image):
+        from .initramfs import parse_lsinitrd
+        try:
+            return parse_lsinitrd(self._run(["lsinitrd", image]).stdout.decode("utf-8", "strict"))
+        except UnicodeError as exc:
+            raise LifecycleError("initramfs listing is not valid UTF-8") from exc
+
     def restore_labels(self, paths):
         if Path(COMMANDS["restorecon"]).exists():
             self._run(["restorecon", *paths])
@@ -525,5 +535,14 @@ class SystemOperations:
         checked_path(status_path)
         import json
         status = json.loads(status_path.read_text())
+        if status.get("state") == "driver-drift":
+            # The fail-safe parked our modules; the update itself succeeded.
+            installed = status.get("installed_driver")
+            outcome = ("the normal entry boots the distribution driver without the override" if status.get("boots_normal_driver")
+                       else f"the default entry {status.get('entry')} has no NVIDIA {installed} kernel module "
+                            f"(depmod selects {status.get('stock_module')}, version {status.get('stock_module_version')})")
+            print(f"VBIOS_DRIFT: installed NVIDIA {installed} differs from the built {status.get('built_driver')}; "
+                  f"{outcome}. To restore the override: {status.get('resume')}", file=sys.stderr)
+            return status
         if status.get("state") != "ready" or status.get("driver") != self.installed_version(load_config(Path(CONFIG)).raw):
             raise LifecycleError("post-transaction service did not leave the latest kernel ready for the installed userspace")

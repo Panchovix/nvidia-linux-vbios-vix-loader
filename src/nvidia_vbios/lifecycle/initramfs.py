@@ -325,6 +325,49 @@ def _read_extracted(tree, member):
     return data
 
 
+_LISTED_MODE = re.compile(r"[-dlcbps][-rwxsStT]{9}[.+@]?")
+
+
+def parse_lsinitrd(text):
+    """Member names of every archive in an `lsinitrd IMAGE` listing (cpio -tv lines)."""
+    names = []
+    for line in text.splitlines():
+        fields = line.split(None, 8)
+        if len(fields) == 9 and _LISTED_MODE.fullmatch(fields[0]):
+            name = fields[8].split(" -> ", 1)[0].removeprefix("./")
+            if name not in (".", ""):
+                names.append(name)
+    if not names:
+        raise LifecycleError("initramfs listing has no members")
+    return names
+
+
+def _archive_names(ops, image, name):
+    listing = ops._run([_command(ops, "lsinitramfs" if name == "initramfs-tools" else "lsinitcpio"), image], timeout=120)
+    archive_names = []
+    try:
+        for line in listing.stdout.decode("utf-8", "strict").splitlines():
+            if line in (".", "./"):
+                continue
+            archive_names.append(_member(line.removeprefix("./").rstrip("/")))
+    except UnicodeError as exc:
+        raise LifecycleError("initramfs listing is not valid UTF-8") from exc
+    return archive_names
+
+
+def list_members(ops, image, *, config=None):
+    """Every member name of a portable initramfs, for presence checks."""
+    image = _trusted_file(image, _root(ops))
+    name = backend(config or getattr(ops, "lifecycle_config", {}))
+    if name == "dracut":
+        response = ops._run([_command(ops, "lsinitrd"), image], timeout=120)
+        try:
+            return parse_lsinitrd(response.stdout.decode("utf-8", "strict"))
+        except UnicodeError as exc:
+            raise LifecycleError("initramfs listing is not valid UTF-8") from exc
+    return _archive_names(ops, image, name)
+
+
 def extract(ops, image, members, destination=None, *, config=None):
     """Extract once and return exact requested members, allowing usrmerge aliases.
 
@@ -351,15 +394,7 @@ def extract(ops, image, members, destination=None, *, config=None):
             result[member] = observed[0] if observed else None
         return result
     parent = checked_path(Path(destination) if destination is not None else image.parent, root)
-    listing = ops._run([_command(ops, "lsinitramfs" if name == "initramfs-tools" else "lsinitcpio"), image], timeout=120)
-    archive_names = []
-    try:
-        for line in listing.stdout.decode("utf-8", "strict").splitlines():
-            if line in (".", "./"):
-                continue
-            archive_names.append(_member(line.removeprefix("./").rstrip("/")))
-    except UnicodeError as exc:
-        raise LifecycleError("initramfs listing is not valid UTF-8") from exc
+    archive_names = _archive_names(ops, image, name)
     if SYSTEMD_WANT_PATH in names:
         # A lower-precedence native unit and its wants link do not establish
         # effective enablement when an override masks/replaces that unit or a

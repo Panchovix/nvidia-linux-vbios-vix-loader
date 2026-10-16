@@ -8,7 +8,9 @@ import sys
 import time
 from .config import load_config
 from .engine import CONFIG, STATE, Reconciler
-from .security import LifecycleError, checked_path, json_write, token
+from .security import LifecycleError, LockBusy, checked_path, json_write, token
+
+DEFERRED = "VBIOS_DEFERRED: reconcile running; queued"
 
 
 def queue_event(action, kernel, root=Path("/"), operations=None):
@@ -29,8 +31,27 @@ def queue_event(action, kernel, root=Path("/"), operations=None):
     event = {"action": action, "kernel": kernel, "queued": time.time()}
     json_write(directory / (kernel + ".json"), event)
     if root == Path("/") or operations is not None:
-        event["retained_default"] = Reconciler(root, operations).guard_default()
+        try:
+            event["retained_default"] = Reconciler(root, operations).guard_default()
+        except LockBusy:
+            # A running reconcile owns the lock, for example while akmods runs a
+            # nested package transaction for it. The queued event is already on
+            # disk; that run, the path unit or the timer picks it up.
+            event["deferred"] = True
     return event
+
+
+def after_drift(worker, kernel, result):
+    """Driver drift: register the exact upstream tag once, then build the override again."""
+    from ..driver_update import DriverUpdate
+    try:
+        fetched = DriverUpdate(worker.root, worker.ops).auto_source(result["installed_driver"])
+    except (LifecycleError, OSError) as exc:
+        fetched = {"state": "failed", "error": str(exc)}
+    if fetched.get("state") != "registered":
+        return dict(result, source_fetch=fetched)
+    # A failed build rolls back to the normal entry: the fail-safe again.
+    return dict(worker.reconcile(kernel), source_fetch=fetched)
 
 
 def kernel_key(kernel):
@@ -77,6 +98,8 @@ def main(argv=None):
     try:
         if args.action == "queue":
             result = queue_event(args.event, args.kernel)
+            if result.get("deferred"):
+                print(DEFERRED, file=sys.stderr)
         elif args.action in ("guard", "post-transaction"):
             if not Path(CONFIG).exists():
                 return 0
@@ -85,7 +108,12 @@ def main(argv=None):
                 return 0
             worker = Reconciler()
             if args.action == "post-transaction":
-                queue_event("changed", "userspace", operations=worker.ops)
+                event = queue_event("changed", "userspace", operations=worker.ops)
+                if isinstance(event, dict) and event.get("deferred"):
+                    # Starting the service synchronously here would wait on the
+                    # running job, which may itself wait on this transaction.
+                    print(DEFERRED, file=sys.stderr)
+                    return 0
                 if args.defer:
                     # Native APT/libalpm callbacks still hold their parent lock.
                     # Start a service without waiting; it retries lock acquisition
@@ -118,6 +146,8 @@ def main(argv=None):
                         raise
                     time.sleep(delay)
                     delay = min(delay * 2, 5)
+            if not args.dry_run and result.get("state") == "driver-drift":
+                result = after_drift(worker, kernel, result)
             if not args.dry_run:
                 pending = Path(STATE) / "pending"
                 if pending.exists():
