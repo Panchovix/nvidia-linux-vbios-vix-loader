@@ -89,6 +89,8 @@ todavía no se ha verificado un arranque real con 17 o 32 GPUs.
 - Un **payload** de VBIOS por GPU: una imagen de una sola cadena para esa tarjeta exacta. Los volcados de ROM
   completos con dos bancos se rechazan. Con la herramienta de línea de comandos de Vix Editor:
   `./nvbios-<versión>-linux-x86_64 normalize editada.rom gpu0.bin`.
+  Para Ada y Ampere, agrega el `--representation` indicado más arriba (`ada-relocated-v1`, `ada-relocated-v2` o
+  `ampere-relocated-v1`); sin él, el payload supera el límite de 512 KiB del GSP y se rechaza.
 
 ## Instalación
 
