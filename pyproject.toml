@@ -7,7 +7,7 @@ name = "nvidia-linux-vbios-vix-loader"
 version = "0.1.0"
 description = "Load a modified VBIOS per NVIDIA GPU at boot on Linux, in memory, through the open kernel modules"
 readme = "README.md"
-license = "MIT"
+license = "GPL-3.0-or-later AND MIT"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 requires-python = ">=3.11"
 classifiers = [

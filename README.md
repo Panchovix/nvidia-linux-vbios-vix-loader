@@ -213,4 +213,11 @@ The tests use synthetic files only; they never touch a GPU, `/boot` or the insta
 
 ## License
 
-MIT. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Copyright (C) 2026 panchovix. GNU General Public License v3.0 or later (`GPL-3.0-or-later`), see
+[LICENSE](LICENSE): you can use, study, change and share it, and changed versions you share must stay under
+the same license.
+
+The kernel module patches (`patches/*.patch`) and `src/nvidia_vbios/driver/_payload.py` derive from NVIDIA's
+open kernel modules and stay under the MIT license, so a patched module can still be built and shared with the
+Linux kernel (GPLv2). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Earlier versions were released under
+the MIT license.

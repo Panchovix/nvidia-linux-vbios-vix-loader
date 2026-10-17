@@ -220,4 +220,11 @@ Los tests usan solo archivos sintéticos; nunca tocan una GPU, `/boot` ni el sis
 
 ## Licencia
 
-MIT. Ver [LICENSE](LICENSE) y [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Copyright (C) 2026 panchovix. Licencia Pública General de GNU v3.0 o posterior (`GPL-3.0-or-later`), ver
+[LICENSE](LICENSE): puedes usarlo, estudiarlo, modificarlo y compartirlo, y las versiones modificadas que
+compartas deben seguir bajo la misma licencia.
+
+Los parches del módulo del kernel (`patches/*.patch`) y `src/nvidia_vbios/driver/_payload.py` derivan de los
+módulos abiertos del kernel de NVIDIA y siguen bajo la licencia MIT, para que un módulo parchado se pueda
+compilar y compartir junto al kernel de Linux (GPLv2). Ver [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Las
+versiones anteriores se publicaron bajo la licencia MIT.
