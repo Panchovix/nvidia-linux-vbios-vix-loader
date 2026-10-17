@@ -87,7 +87,8 @@ yet been verified.
 - One VBIOS **payload** per GPU: a single-chain image for that exact card. Full ROM dumps that contain two
   banks are refused. With Vix Editor's command-line tool: `./nvbios-<version>-linux-x86_64 normalize edited.rom gpu0.bin`.
   For Ada and Ampere, add the `--representation` given above (`ada-relocated-v1`, `ada-relocated-v2` or
-  `ampere-relocated-v1`); without it the payload exceeds the 512 KiB GSP limit and is refused.
+  `ampere-relocated-v1`); without it the payload exceeds the 512 KiB GSP limit and is refused. Vix Editor
+  0.1.11 or newer also saves this payload as `<name>-loader.bin` next to an edited Ada or Ampere copy.
 
 ## Install
 

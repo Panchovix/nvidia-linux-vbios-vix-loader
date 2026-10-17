@@ -49,8 +49,9 @@ def find_legacy(data: bytes, vendor: int, device: int) -> int:
             raise PayloadError(f'legacy image at {offset:#x} has a nonzero checksum')
         found.append(offset)
     if len(found) != 1:
-        hint = (' (a full ROM with two banks?); export a single-chain payload with your VBIOS editor, '
-                "for example the `normalize` command of Vix Editor's command-line tool" if len(found) > 1 else '')
+        hint = (' (a full ROM with two banks?); load a single-chain payload instead: Vix Editor saves one as '
+                '<name>-loader.bin next to an edited Ampere or Ada copy, and its `normalize` command exports '
+                'one from any ROM' if len(found) > 1 else '')
         raise PayloadError(f'payload has {len(found)} legacy images; the driver needs exactly one{hint}')
     return found[0]
 
@@ -83,10 +84,10 @@ def check_loadable_payload(data: bytes, vendor: int, device: int) -> str:
         size = gsp_bytes(data, vendor, device)
         if size > GA10X_MAX_SIZE:
             chip = 'Ampere GA10x' if family == 'ampere' else 'Ada AD10x'
-            hint = ('Export an experimental relocated payload for the open-source loader with your VBIOS editor, '
-                    'for example `nvbios normalize edited.rom payload.bin --representation ampere-relocated-v1` '
-                    '(Vix Editor).'
-                    if family == 'ampere' else 'Export a supported relocated payload with your VBIOS editor.')
+            representation = 'ampere-relocated-v1' if family == 'ampere' else 'ada-relocated-v2'
+            hint = ('Load an experimental relocated payload instead: Vix Editor saves one as <name>-loader.bin '
+                    'next to an edited copy, or export it with `nvbios normalize edited.rom payload.bin '
+                    f'--representation {representation}`.')
             raise PayloadError(f'{chip} GSP accepts at most 512 KiB (524288 bytes) from the legacy image; '
                                f'this payload sends {size} bytes. {hint}')
     return family
