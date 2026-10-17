@@ -11,7 +11,11 @@ Thanks to **@pantsoftime** ([overclock.net](https://www.overclock.net)), whose o
 this project is built on. Without it, none of this would have been possible.
 
 To modify the VBIOS, use [NVIDIA VBIOS Vix Editor](https://github.com/Panchovix/nvidia-vbios-vix-editor).
-This repository only loads it.
+This repository only loads it. On Windows, use
+[NVIDIA Windows VBIOS Vix Loader](https://github.com/Panchovix/nvidia-windows-vbios-vix-loader).
+
+This project is not affiliated with or endorsed by NVIDIA. NVIDIA and GeForce are trademarks of NVIDIA
+Corporation.
 
 > **Warning.** A modified VBIOS can raise power, clocks and voltages beyond the card's design limits. You can
 > damage hardware. Keep a copy of your original ROM and use this at your own risk.

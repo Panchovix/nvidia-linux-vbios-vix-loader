@@ -11,7 +11,11 @@ Gracias a **@pantsoftime** ([overclock.net](https://www.overclock.net)): este pr
 original `vbios_override`, y sin él nada de esto habría sido posible.
 
 Para modificar la VBIOS, usa [NVIDIA VBIOS Vix Editor](https://github.com/Panchovix/nvidia-vbios-vix-editor).
-Este repositorio solo la carga.
+Este repositorio solo la carga. En Windows, usa
+[NVIDIA Windows VBIOS Vix Loader](https://github.com/Panchovix/nvidia-windows-vbios-vix-loader).
+
+Este proyecto no está afiliado a NVIDIA ni cuenta con su respaldo. NVIDIA y GeForce son marcas registradas
+de NVIDIA Corporation.
 
 > **Advertencia.** Una VBIOS modificada puede subir potencia, frecuencias y voltajes más allá de los límites de
 > diseño de la tarjeta. Puedes dañar el hardware. Guarda una copia de tu ROM original y úsalo bajo tu propio riesgo.
