@@ -96,6 +96,30 @@ todavía no se ha verificado un arranque real con 17 o 32 GPUs.
   Para Ada y Ampere, agrega el `--representation` indicado más arriba (`ada-relocated-v1`, `ada-relocated-v2` o
   `ampere-relocated-v1`); sin él, el payload supera el límite de 512 KiB del GSP y se rechaza.
 
+## Ventana
+
+En Fedora y la familia RHEL el loader también tiene una ventana, como alternativa a los pasos de
+[Instalación](#instalación). Necesita GTK 4.10 o más nuevo y PyGObject (`sudo dnf install python3-gobject gtk4`).
+
+```sh
+./vbios-loader-gui
+```
+
+Ábrela desde un clon, **sin** `sudo`. Muestra el driver, el kernel, Secure Boot y el arranque que detectó, y una
+fila por GPU. Para cada GPU elige **Archivo nuevo** (el `.rom` o el `<nombre>-loader.bin` que guardó el editor; se
+revisa apenas lo eliges), **Mantener el archivo actual** o **VBIOS propia (sin override)**. Elige de dónde sale el código de NVIDIA (la copia
+guardada en la última carga, una descarga de la versión instalada o una carpeta; marca las fuentes P2P) y pulsa
+**Cargar**. Pide tu contraseña una vez y ejecuta `nvbios system setup`, que hace los pasos 2-4 de abajo, con el
+progreso en vivo. Luego reinicia; tu entrada de arranque normal sigue en el menú y nunca carga el override.
+**Quitar override** ejecuta `nvbios system disable`. Menú > **Detalles** muestra `nvbios system status`.
+
+Probada en Fedora 43 con ocho GPUs: dos archivos nuevos (una RTX PRO 4000 Blackwell SFF y una RTX 2000 Ada,
+ambas subidas a un límite de 106 W) y seis mantenidos; después del reinicio las dos mostraron el límite nuevo.
+
+La ventana no arranca como root. Sin un agente gráfico de contraseñas (por ejemplo por SSH) muestra el comando
+`sudo`. Secure Boot con tu propia clave de firma, otras distribuciones y las actualizaciones del driver con el
+instalador `.run` siguen usando los pasos de línea de comandos.
+
 ## Instalación
 
 Ejecuta esto desde un clon de este repositorio.

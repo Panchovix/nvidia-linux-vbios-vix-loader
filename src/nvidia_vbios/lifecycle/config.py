@@ -8,6 +8,10 @@ import re
 from .security import LifecycleError, checked_path, digest, token, source_tree_hash
 
 HASH = re.compile(r"[0-9a-f]{64}")
+# Relocated runtime representations and the family each one belongs to. The last two verify only against
+# their full ROM (the payload alone does not parse as a ROM), so enrollment keeps that ROM.
+REPRESENTATION_FAMILY = {"ada-relocated-v1": "ada", "ada-relocated-v2": "ada", "ampere-relocated-v1": "ampere"}
+ARCHIVE_VERIFIED = ("ada-relocated-v2", "ampere-relocated-v1")
 BDF = re.compile(r"[0-9a-f]{4,8}:[0-9a-f]{2}:[0-1][0-9a-f]\.[0-7]")
 
 
@@ -41,10 +45,16 @@ def load_config(path: Path, root: Path = Path("/"), *, require_enabled: bool = T
             if device["architecture"] not in ("ampere", "ada", "blackwell-gb20x"):
                 raise LifecycleError("GPU architecture outside Ampere/Ada/consumer-workstation GB20x scope")
             representation = device.get("representation")
-            if representation not in (None, "ada-relocated-v1"):
+            if representation not in (None, *REPRESENTATION_FAMILY):
                 raise LifecycleError("unsupported ROM runtime representation")
-            if representation == "ada-relocated-v1" and device["architecture"] != "ada":
-                raise LifecycleError("Ada relocation requires an Ada device")
+            if representation is not None and device["architecture"] != REPRESENTATION_FAMILY[representation]:
+                raise LifecycleError(f"{representation} requires an {REPRESENTATION_FAMILY[representation]} device")
+            if representation in ARCHIVE_VERIFIED:
+                # These payloads re-verify only from their full ROM, kept beside them under its own SHA-256.
+                if device.get("archive_path") != f"/var/lib/nvidia-vbios/roms/{device['source_sha256']}.rom":
+                    raise LifecycleError(f"{representation} enrollment requires its archived full ROM")
+            elif "archive_path" in device:
+                raise LifecycleError("archive_path is kept only for archive-verified representations")
             if device.get("structurally_validated") is not True:
                 raise LifecycleError("initial ROM/GPU enrollment requires structural validation")
             if "runtime_tested" in device and not isinstance(device["runtime_tested"], bool):

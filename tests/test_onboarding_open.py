@@ -10,7 +10,7 @@ from nvidia_vbios import payload
 from nvidia_vbios.bootstrap import BootstrapError, BootstrapOperations
 from nvidia_vbios.lifecycle.security import digest
 from nvidia_vbios.lifecycle.system import SystemOperations
-from nvidia_vbios.onboarding import Onboarding
+from nvidia_vbios.onboarding import Onboarding, payload_for
 
 from test_payload import legacy_image
 
@@ -88,6 +88,22 @@ class OpenOnboardingTests(unittest.TestCase):
         self.assertEqual(device['architecture'], 'blackwell-gb20x')
         self.assertEqual((device['sha256'], device['source_sha256']), (digest(data), digest(data)))
         self.assertEqual(Path(device['payload']).read_bytes(), data)
+        self.assertNotIn('require_p2p_source', profile)
+
+    def test_p2p_source_stays_required_after_updates(self):
+        self.prepare(legacy_image(PRO_6000), p2p_preferred=True)
+        profile = json.loads((self.output / 'profile.json').read_text())
+        self.assertTrue(profile['driver_sources'][0]['p2p_preferred'])
+        self.assertIs(profile['require_p2p_source'], True)
+
+    def test_payload_check_is_the_one_prepare_uses(self):
+        gpu = {'bdf': '0000:03:00.0', 'vendor': 0x10de, 'device': PRO_6000}
+        data = legacy_image(PRO_6000)
+        self.assertEqual(payload_for(data, 'gpu0.bin', gpu), (data, 'blackwell-gb20x', []))
+        with self.assertRaisesRegex(BootstrapError, '0000:03:00.0: .*exactly one'):
+            payload_for(data * 2, 'gpu0.bin', gpu)
+        with self.assertRaisesRegex(BootstrapError, 'full ROM parser'):
+            payload_for(data, 'gpu0.bin', gpu, 'ada-relocated-v1')
 
     def test_full_rom_wrong_gpu_and_large_ada_are_refused_without_output(self):
         cases = [(legacy_image(PRO_6000) * 2, PRO_6000, 'exactly one'),

@@ -94,7 +94,12 @@ def main(argv=None):
     reconcile = sub.add_parser("reconcile")
     reconcile.add_argument("--kernel")
     reconcile.add_argument("--dry-run", action="store_true")
+    # Explicit only (`nvbios system setup`); hooks and the service never pass it.
+    reconcile.add_argument("--select-default", action="store_true",
+                           help="keep the normal entry of --kernel as the previous default and select the new build")
     args = parser.parse_args(argv)
+    if args.action == "reconcile" and args.select_default and not args.kernel:
+        parser.error("--select-default requires --kernel")
     try:
         if args.action == "queue":
             result = queue_event(args.event, args.kernel)
@@ -138,7 +143,7 @@ def main(argv=None):
                     if not kernels:
                         raise LifecycleError("no installed kernel with a supported normal boot entry found")
                     kernel = args.kernel or kernels[-1]
-                    result = worker.reconcile(kernel, dry_run=args.dry_run)
+                    result = worker.reconcile(kernel, dry_run=args.dry_run, select_default=args.select_default)
                     break
                 except LifecycleError as exc:
                     platform = getattr(worker.ops, "platform", None)

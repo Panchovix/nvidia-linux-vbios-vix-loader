@@ -19,6 +19,8 @@ import sys
 import tempfile
 
 from .bootstrap import BootstrapError, BootstrapOperations, _external, _input_path, _platform
+from .families import GA100_DEVICE_IDS, architecture
+from .lifecycle.config import REPRESENTATION_FAMILY
 from .lifecycle.engine import parse_bls
 from .lifecycle.security import LifecycleError, digest, token
 from .payload import PayloadError, check_loadable_payload, optional_editor
@@ -34,6 +36,23 @@ def canonical_bdf(value):
     if match is None or int(match[1], 16) > 0xffff:
         raise BootstrapError(f'invalid physical PCI BDF: {value}')
     return f'{int(match[1], 16):04x}:{match[2].lower()}:{match[3].lower()}'
+
+
+def payload_for(archive, name, gpu, representation=None):
+    """(payload, family, BIOS versions) that prepare enrolls from `archive` for `gpu`; BootstrapError when refused.
+
+    Pure: reads no files and changes nothing, so an unprivileged caller can check a file first."""
+    editor = optional_editor()
+    if editor is not None:
+        return editor.prepare_payload(archive, name, gpu, representation)
+    if representation is not None:
+        raise BootstrapError('payload representations need a full ROM parser; supply the payload your VBIOS editor exported')
+    # The open loader enrolls an already single-chain payload, checked by the kernel's own rule.
+    try:
+        family = check_loadable_payload(archive, gpu['vendor'], gpu['device'])
+    except PayloadError as exc:
+        raise BootstrapError(f'{gpu["bdf"]}: {exc}') from None
+    return archive, family, []
 
 
 def _publish(stage, destination):
@@ -246,28 +265,19 @@ class Onboarding:
         recipes = {}
         for selector, representation in representations:
             gpu = self.select(selector, inventory)
-            if gpu['bdf'] in recipes or representation != REPRESENTATION:
+            if gpu['bdf'] in recipes or representation not in REPRESENTATION_FAMILY:
                 raise BootstrapError('duplicate or unsupported explicit representation')
+            if architecture(gpu['device'])['family'] != REPRESENTATION_FAMILY[representation] or gpu['device'] in GA100_DEVICE_IDS:
+                raise BootstrapError(f'{representation} does not apply to GPU {gpu["bdf"]}')
             recipes[gpu['bdf']] = representation
         if not set(recipes).issubset({gpu['bdf'] for gpu, _ in selected}):
             raise BootstrapError('representation selector must identify a selected GPU')
         records, files, original_hashes = [], {}, {}
-        editor = optional_editor()
         for gpu, rom in selected:
             archive = _external(rom)
             original_hashes[str(rom)] = digest(archive)
             representation = recipes.get(gpu['bdf'])
-            if editor is not None:
-                payload, family, versions = editor.prepare_payload(archive, str(rom), gpu, representation)
-            elif representation is not None:
-                raise BootstrapError('payload representations need a full ROM parser; supply the payload your VBIOS editor exported')
-            else:
-                # The open loader enrolls an already single-chain payload, checked by the kernel's own rule.
-                try:
-                    family = check_loadable_payload(archive, gpu['vendor'], gpu['device'])
-                except PayloadError as exc:
-                    raise BootstrapError(f'{gpu["bdf"]}: {exc}') from None
-                payload, versions = archive, []
+            payload, family, versions = payload_for(archive, str(rom), gpu, representation)
             stem = gpu['bdf'].replace(':', '-').replace('.', '-')
             archive_name, payload_name = f'archives/{stem}.rom', f'payloads/{stem}.bin'
             record = {key: gpu[key] for key in ('uuid', 'bdf', 'vendor', 'device')}
@@ -293,6 +303,8 @@ class Onboarding:
                    'discovery': [{'index': gpu['index'], 'name': gpu['name'], 'uuid': gpu['uuid'], 'bdf': gpu['bdf']} for gpu, _ in selected]}
         if boot:
             profile['boot'] = boot
+        if p2p_preferred:
+            profile['require_p2p_source'] = True  # later post-install and drift must keep a P2P source
         if signing_key:
             profile['signing'] = {'key':str(signing_key),'certificate':str(signing_certificate)}
         # Recheck mutable inputs and physical identities before publishing anything.

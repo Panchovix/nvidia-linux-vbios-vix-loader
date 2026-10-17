@@ -60,6 +60,7 @@ SYSTEM_USAGE = '''usage: nvbios system COMMAND [options]
   rollback       undo one install, enroll or enable transaction
   pre-install    pause automation before a manual driver change
   post-install   register the new driver source and rebuild
+  setup          prepare, install, enroll, build and enable in one step (used by the window)
 
 Run `nvbios system COMMAND --help` for the options of one command.'''
 
@@ -78,6 +79,9 @@ def system_main(argv):
     if argv and argv[0] == 'post-install':
         from .driver_update import main as post_install_main
         return post_install_main(argv[1:])
+    if argv and argv[0] == 'setup':
+        from .system_setup import main as setup_main
+        return setup_main(argv[1:])
     if argv and argv[0] in {'install', 'enroll', 'enable', 'status', 'disable', 'rollback'}:
         from .bootstrap import main as bootstrap_main
         return bootstrap_main(argv)

@@ -426,6 +426,13 @@ class PortableLifecycleTests(unittest.TestCase):
             self.assertEqual(self.ops.environment, environment)
         self.assertEqual(self.ops.builds, 0)
 
+    def test_explicit_default_selection_is_refused_for_portable_boot(self):
+        self.setup_profile('systemd-boot')
+        environment = dict(self.ops.environment)
+        with self.assertRaisesRegex(LifecycleError, 'select-default'):
+            self.worker.reconcile(self.new, select_default=True)
+        self.assertEqual((self.ops.environment, self.ops.builds), (environment, 0))
+
     def _assert_unmanaged_artifact_is_preserved(self, backend, artifact):
         self.setup_profile(backend)
         plan = self.worker.plan(self.new)

@@ -24,7 +24,7 @@ import time
 from .lifecycle.security import (LifecycleError, atomic_write, checked_path, digest,
                                  hash_file, json_write, locked, resolve_trusted_file,
                                  source_tree_hash, token)
-from .lifecycle.config import load_config
+from .lifecycle.config import ARCHIVE_VERIFIED, load_config
 from .lifecycle import hook_templates
 from .lifecycle.engine import CONFIG, STATE, Reconciler, parse_bls
 
@@ -200,7 +200,8 @@ class BootstrapOperations:
         # Validate the full container before selecting an Ada primary bank.
         if serial and str(serial).encode('ascii') not in archive:
             raise BootstrapError('full archival ROM lacks the enrolled board serial')
-        if archive != payload:
+        # A payload that verifies only from its full ROM must always be reproduced from a real archive.
+        if archive != payload or device.get('representation') in ARCHIVE_VERIFIED:
             editor = optional_editor()
             if editor is None:
                 raise BootstrapError('archive differs from its payload; the open loader enrolls the single-chain payload itself')
@@ -533,7 +534,11 @@ class Bootstrap:
             output['representation'] = device['representation']
         output.update(structurally_validated=True, evidence=evidence,
                       payload_path=f'/var/lib/nvidia-vbios/roms/{device["sha256"]}.bin')
-        return output, payload
+        if output.get('representation') in ARCHIVE_VERIFIED:
+            # The payload re-verifies only from its full ROM: keep the ROM for later Loads that keep this GPU.
+            output['archive_path'] = f'/var/lib/nvidia-vbios/roms/{device["source_sha256"]}.rom'
+            return output, payload, archive
+        return output, payload, None
 
     def enroll(self, profile, *, dry_run=False):
         profile = _input(profile)
@@ -548,9 +553,11 @@ class Bootstrap:
         actual = self.ops.inventory()
         devices, payloads = [], {}
         for device in profile['devices']:
-            selected, data = self._archive_device(device, actual)
+            selected, data, archive = self._archive_device(device, actual)
             devices.append(selected)
             payloads[selected['payload_path']] = data
+            if archive is not None:
+                payloads[selected['archive_path']] = archive
         normal_boot = None
         if profile.get('boot'):
             from .lifecycle.boot import BootAdapter, entry_identity

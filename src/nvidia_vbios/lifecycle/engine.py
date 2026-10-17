@@ -341,7 +341,7 @@ class Reconciler:
             raise LifecycleError("could not select the driver-drift boot entry")
         return target
 
-    def _guard_default(self, config, fleet):
+    def _guard_default(self, config, fleet, select=None):
         if fleet.get("drift"):
             return self._guard_drift(config, fleet)
         last = fleet.get("last_ready")
@@ -361,6 +361,10 @@ class Reconciler:
         saved = env.get("saved_entry")
         if saved == target:
             return target
+        if select and self._saved_normal_kernel(config, saved) == select:
+            # Only `reconcile --kernel K --select-default` (setup after disable, never
+            # hooks): the conventional normal entry of K stays the previous default.
+            return saved
         # Recognize an actual normal entry on this installation as an update
         # candidate. A different OS, legacy entry not explicitly seeded, older
         # managed entry, or deliberate same-kernel normal choice is preserved.
@@ -1027,10 +1031,11 @@ class Reconciler:
                 warnings.append(f"{record.get('path') if isinstance(record, dict) else record}: {exc}")
         return warnings
 
-    def reconcile(self, kernel, *, dry_run=False):
+    def reconcile(self, kernel, *, dry_run=False, select_default=False):
         if dry_run:
             return self.dry_run(kernel)
         kernel = token(kernel)
+        select = kernel if select_default else None
         self.trusted(self.state, missing=True)
         self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
         status_path = self.state / f"status-{kernel}.json"
@@ -1060,7 +1065,7 @@ class Reconciler:
                 refused = None
                 if old.get("phase") not in ("installing", "selecting", "rollback-failed"):
                     try:
-                        self._guard_default(config, fleet)
+                        self._guard_default(config, fleet, select)
                     except LifecycleError as problem:
                         if not self._park_despite(config, problem):
                             raise
@@ -1096,7 +1101,7 @@ class Reconciler:
                         except Exception as problem:
                             rollback_error = str(problem)  # no fail-safe below: the journal needs review
                             raise LifecycleError("the interrupted transaction could not be rolled back") from problem
-                previous = self._guard_default(config, fleet)
+                previous = self._guard_default(config, fleet, select)
                 # Save the prior committed boot pair before a same-kernel update
                 # replaces its fleet slot. Failure only disables this optional cleanup.
                 from .retention import remember

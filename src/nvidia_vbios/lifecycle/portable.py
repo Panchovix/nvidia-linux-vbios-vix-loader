@@ -192,7 +192,9 @@ class PortableReconciler(Reconciler):
         except (LifecycleError, OSError, ValueError):
             return 'unknown'
 
-    def _guard_default(self, config, fleet):
+    def _guard_default(self, config, fleet, select=None):
+        if select:
+            raise LifecycleError('explicit default selection (--select-default) is only reviewed for Fedora BLS entries')
         if fleet.get('drift'):
             return self._guard_drift(config, fleet)
         normal = self._fallback(config, fleet)

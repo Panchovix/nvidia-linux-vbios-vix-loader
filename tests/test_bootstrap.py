@@ -358,6 +358,71 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(Reconciler(self.root, self.ops).reconcile(OLD)['state'], 'ready')
         self.assertEqual(self.ops.builds, builds)
 
+    def reload(self, payload=None):
+        """First Load, Remove (disable), then enroll again on the same kernel, as the window's second Load does."""
+        self.worker.install(self.repository); self.enroll(); first = self.ready(); self.worker.enable(OLD)
+        self.worker.disable()
+        if payload:
+            file = self.root / 'inputs/gpu0-new.rom'
+            atomic_write(file, payload)
+            self.profile = dict(self.profile, devices=[dict(self.device(0), archive=str(file), payload=str(file),
+                                source_sha256=digest(payload), sha256=digest(payload), source_size=len(payload), size=len(payload))])
+        self.enroll()
+        self.assertEqual(self.ops.environment['saved_entry'], self.normal)
+        return first
+
+    def test_select_default_builds_a_new_payload_after_disable_and_enable_keeps_it(self):
+        first = self.reload(b'REVIEWED ROM payload CHANGED')
+        configuration = self.worker.path(CONFIG).read_bytes()
+        with self.assertRaisesRegex(RuntimeError, 'foreign or unrelated'):
+            Reconciler(self.root, self.ops).reconcile(OLD)  # without the flag the normal default is a user choice
+        self.assertEqual(self.ops.environment['saved_entry'], self.normal)
+        result = Reconciler(self.root, self.ops).reconcile(OLD, select_default=True)
+        self.assertEqual(result['state'], 'ready')
+        self.assertNotEqual(result['entry'], first['entry'])
+        self.assertEqual(self.ops.environment['saved_entry'], result['entry'])
+        journal = json.loads((self.root / STATE.lstrip('/') / 'transaction.json').read_text())
+        self.assertEqual(journal['previous_default'], self.normal)
+        self.assertEqual(self.worker.path(CONFIG).read_bytes(), configuration)  # never persisted
+        enabled = self.worker.enable(OLD)
+        self.assertEqual(enabled['default_selection']['state'], 'ready')
+        self.assertTrue(self.ops.enabled)
+
+    def test_select_default_failures_roll_back_to_the_normal_default(self):
+        self.reload(b'REVIEWED ROM payload CHANGED')
+        for fault, message in (('build', 'make failed'), ('default', 'grub wrote then failed')):
+            self.ops.fault = fault
+            with self.subTest(fault=fault), self.assertRaisesRegex(RuntimeError, message):
+                Reconciler(self.root, self.ops).reconcile(OLD, select_default=True)
+            self.assertEqual(self.ops.environment['saved_entry'], self.normal)
+        self.assertFalse(self.ops.enabled)
+
+    def test_select_default_reuses_an_unchanged_build_and_enable_selects_it(self):
+        first = self.reload()
+        builds = self.ops.builds
+        result = Reconciler(self.root, self.ops).reconcile(OLD, select_default=True)
+        self.assertEqual((result['entry'], self.ops.builds), (first['entry'], builds))
+        self.assertEqual(self.ops.environment['saved_entry'], self.normal)
+        self.assertEqual(self.worker.enable(OLD)['default_selection']['state'], 'selected')
+        self.assertEqual(self.ops.environment['saved_entry'], first['entry'])
+
+    def test_select_default_keeps_every_other_guard(self):
+        first = self.reload(b'REVIEWED ROM payload CHANGED')
+        builds = self.ops.builds
+        for environment in ({'saved_entry': 'another-os'}, {'saved_entry': self.normal, 'next_entry': 'one-time-os'},
+                            {'saved_entry': self.normal, 'prev_saved_entry': 'another-transition'},
+                            {'saved_entry': self.normal, 'tuned_params': 'quiet;reboot'}):
+            self.ops.environment = dict(environment)
+            with self.subTest(environment=environment), self.assertRaisesRegex(RuntimeError, 'foreign or unrelated|transition is pending|unsafe GRUB'):
+                Reconciler(self.root, self.ops).reconcile(OLD, select_default=True)
+            self.assertEqual(self.ops.environment, environment)
+        self.ops.environment = {'saved_entry': self.normal}
+        image = next(record['path'] for record in first['deployment'] if record['path'].startswith('/boot/initramfs-'))
+        (self.root / image.lstrip('/')).write_bytes(b'CHANGED READY IMAGE')
+        with self.assertRaisesRegex(RuntimeError, 'last ready boot artifact changed'):
+            Reconciler(self.root, self.ops).reconcile(OLD, select_default=True)
+        self.assertEqual((self.ops.environment, self.ops.builds), ({'saved_entry': self.normal}, builds))
+
     def test_reenable_preserves_foreign_and_one_time_boot_choices(self):
         self.worker.install(self.repository); self.enroll(); self.ready(); self.worker.enable(OLD)
         for choices in ({'saved_entry': 'another-os'},

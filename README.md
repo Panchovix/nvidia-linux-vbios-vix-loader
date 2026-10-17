@@ -94,6 +94,30 @@ yet been verified.
   `ampere-relocated-v1`); without it the payload exceeds the 512 KiB GSP limit and is refused. Vix Editor
   0.1.11 or newer also saves this payload as `<name>-loader.bin` next to an edited Ada or Ampere copy.
 
+## Window
+
+On Fedora and RHEL-family systems the loader also has a window, as an alternative to the steps under
+[Install](#install). It needs GTK 4.10 or newer and PyGObject (`sudo dnf install python3-gobject gtk4`).
+
+```sh
+./vbios-loader-gui
+```
+
+Run it from a clone, **without** `sudo`. It shows the driver, kernel, Secure Boot and boot setup it detected and
+one row per GPU. For each GPU choose **New file** (the `.rom` or `<name>-loader.bin` the editor saved, checked as
+soon as you pick it), **Keep the current file** or **Own VBIOS (no override)**. Choose where the NVIDIA source comes from (the copy saved
+at the last Load, a download of the installed version, or a folder; mark P2P sources), then press **Load**. It asks
+for your password once and runs `nvbios system setup`, which does steps 2-4 below, with live progress. Then reboot;
+your normal boot entry stays in the menu and never loads the override. **Remove override** runs `nvbios system
+disable`. Menu > **Details** shows `nvbios system status`.
+
+Tested on Fedora 43 with eight GPUs: two new files (an RTX PRO 4000 Blackwell SFF and an RTX 2000 Ada, both
+raised to a 106 W power limit) and six kept; after the reboot both reported the new limit.
+
+The window refuses to start as root. Without a graphical password agent (for example over SSH) it prints the
+`sudo` command instead. Secure Boot with your own signing key, other distributions and driver updates with the
+`.run` installer still use the command-line steps.
+
 ## Install
 
 Run these from a clone of this repository.
