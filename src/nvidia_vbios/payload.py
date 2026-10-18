@@ -15,7 +15,9 @@ from .families import GA100_DEVICE_IDS, architecture
 MAX_SIZE = 4 * 1024 * 1024
 GA10X_MAX_SIZE = 512 * 1024
 ADA_MAX_SIZE = GA10X_MAX_SIZE  # Compatibility name: AD10x has the same audited capacity.
-SCOPE = ('ampere', 'ada', 'blackwell-gb20x')
+# TU10x/TU11x (gsp_tu10x.bin) has the same 512 KiB: found by static emulation of the capacity
+# callback of the 615.78.08 firmware, whose override receiver matches gsp_ga10x.bin; not hardware-tested.
+SCOPE = ('turing', 'ampere', 'ada', 'blackwell-gb20x')
 
 
 class PayloadError(ValueError):
@@ -50,7 +52,7 @@ def find_legacy(data: bytes, vendor: int, device: int) -> int:
         found.append(offset)
     if len(found) != 1:
         hint = (' (a full ROM with two banks?); load a single-chain payload instead: Vix Editor saves one as '
-                '<name>-loader.bin next to an edited Ampere or Ada copy, and its `normalize` command exports '
+                '<name>-loader.bin next to an edited Turing, Ampere or Ada copy, and its `normalize` command exports '
                 'one from any ROM' if len(found) > 1 else '')
         raise PayloadError(f'payload has {len(found)} legacy images; the driver needs exactly one{hint}')
     return found[0]
@@ -67,27 +69,37 @@ def check_payload(data: bytes, vendor: int, device: int) -> str:
         raise PayloadError('only NVIDIA GPUs are supported')
     family = architecture(device)['family']
     if family not in SCOPE:
-        raise PayloadError(f'PCI device {device:04x} is outside the supported Ampere/Ada/GB20x scope')
+        raise PayloadError(f'PCI device {device:04x} is outside the supported Turing/Ampere/Ada/GB20x scope')
     find_legacy(data, vendor, device)
     return family
 
 
 def check_loadable_payload(data: bytes, vendor: int, device: int) -> str:
-    """Kernel parser checks plus the audited GA10x/AD10x GSP receiver capacity.
+    """Kernel parser checks plus the audited TU10x/TU11x, GA10x and AD10x GSP receiver capacity.
 
     The driver sends everything from the selected legacy image to the end of the
     payload. Prefix bytes are not sent. GA100 uses different, unaudited firmware;
-    no 512 KiB capacity is inferred for it or for Blackwell from this audit.
+    no 512 KiB capacity is inferred for it or for Blackwell from this audit. The
+    Turing value comes from static emulation of gsp_tu10x.bin 615.78.08, not from
+    hardware; every reviewed Turing single-bank payload is far below it.
     """
     family = check_payload(data, vendor, device)
-    if family == 'ada' or (family == 'ampere' and device not in GA100_DEVICE_IDS):
+    if family in ('ada', 'turing') or (family == 'ampere' and device not in GA100_DEVICE_IDS):
         size = gsp_bytes(data, vendor, device)
         if size > GA10X_MAX_SIZE:
-            chip = 'Ampere GA10x' if family == 'ampere' else 'Ada AD10x'
-            representation = 'ampere-relocated-v1' if family == 'ampere' else 'ada-relocated-v2'
-            hint = ('Load an experimental relocated payload instead: Vix Editor saves one as <name>-loader.bin '
-                    'next to an edited copy, or export it with `nvbios normalize edited.rom payload.bin '
-                    f'--representation {representation}`.')
+            chip = {'ampere': 'Ampere GA10x', 'ada': 'Ada AD10x', 'turing': 'Turing TU10x/TU11x'}[family]
+            if family == 'turing':
+                # One legacy image (two are refused above), so the extra bytes follow the image chain:
+                # plain normalize keeps them, the e0-end export ends at the last data image.
+                hint = ('The file keeps flash bytes after its image chain (a full-size dump whose second bank is '
+                        'erased?). Load the chain alone instead: Vix Editor saves it as <name>-loader-e0end.bin '
+                        'next to an edited copy, or export it with `nvbios normalize edited.rom payload.bin '
+                        '--representation turing-e0-end-v1`.')
+            else:
+                representation = 'ampere-relocated-v1' if family == 'ampere' else 'ada-relocated-v2'
+                hint = ('Load an experimental relocated payload instead: Vix Editor saves one as <name>-loader.bin '
+                        'next to an edited copy, or export it with `nvbios normalize edited.rom payload.bin '
+                        f'--representation {representation}`.')
             raise PayloadError(f'{chip} GSP accepts at most 512 KiB (524288 bytes) from the legacy image; '
                                f'this payload sends {size} bytes. {hint}')
     return family

@@ -66,6 +66,17 @@ archivo conserva un prefijo de ~37 KiB que no se envía); lo que no verifica se 
 Si la pruebas, abre un issue con el resultado. GA100 usa otro firmware y queda fuera
 de esta auditoría de capacidad.
 
+**Turing (TU102, TU104, TU106, TU116, TU117), experimental, sin probar en ninguna GPU Turing.** El módulo
+parcheado acepta estos chips, y su firmware GSP (`gsp_tu10x.bin`) tiene el mismo receptor de override y el
+mismo límite de 512 KiB (calculado por análisis estático de 615.78.08, no en hardware). Un payload Turing de un
+solo banco envía 250-355 KB desde la imagen legacy (el archivo conserva un prefijo de hasta ~162 KiB que no se
+envía) y no necesita reubicación: `nvbios normalize editada.rom gpu0.bin`. Vix Editor 0.1.18 o
+posterior también guarda `<nombre>-loader-e0end.bin` (`--representation turing-e0-end-v1`), una variante para probar
+cuando el primer archivo se carga pero el cambio no se aplica. Si el GSP rechaza una imagen, la tarjeta usa
+su VBIOS de fábrica. Para ayudar, sigue la [guía para probar Turing](https://github.com/Panchovix/nvidia-vbios-vix-editor/blob/main/docs/turing_es.md): carga primero tu ROM
+sin modificar, luego un cambio de límite de potencia, y reporta `nvidia-smi -q -d POWER` antes y después y la
+línea `vbios_override` de `journalctl -k -b`.
+
 ## Varias GPUs
 
 Selecciona **de 1 a 32 GPUs**, repitiendo `--device INDICE PAYLOAD` para cada una.
@@ -94,7 +105,8 @@ todavía no se ha verificado un arranque real con 17 o 32 GPUs.
   completos con dos bancos se rechazan. Con la herramienta de línea de comandos de Vix Editor:
   `./nvbios-<versión>-linux-x86_64 normalize editada.rom gpu0.bin`.
   Para Ada y Ampere, agrega el `--representation` indicado más arriba (`ada-relocated-v1`, `ada-relocated-v2` o
-  `ampere-relocated-v1`); sin él, el payload supera el límite de 512 KiB del GSP y se rechaza.
+  `ampere-relocated-v1`); sin él, el payload supera el límite de 512 KiB del GSP y se rechaza. Turing no lo
+  necesita.
 
 ## Ventana
 

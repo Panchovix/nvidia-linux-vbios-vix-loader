@@ -151,7 +151,9 @@ _kgspVbiosOverridePrepare(OBJGPU *pGpu, KernelGsp *pKernelGsp, NvU64 memdescFlag
     if (osReadRegistryDword(pGpu, NV_VBIOS_OVERRIDE_MODE_KEY, &mode) != NV_OK || mode == 0)
         return;
     // Explicit chip scope: no Hopper, datacenter Blackwell, or future chips.
-    if (!(IsGA100(pGpu) || IsGA102(pGpu) || IsGA103(pGpu) || IsGA104(pGpu) ||
+    if (!(IsTU102(pGpu) || IsTU104(pGpu) || IsTU106(pGpu) || IsTU116(pGpu) ||
+          IsTU117(pGpu) ||
+          IsGA100(pGpu) || IsGA102(pGpu) || IsGA103(pGpu) || IsGA104(pGpu) ||
           IsGA106(pGpu) || IsGA107(pGpu) || IsAD102(pGpu) ||
           IsAD103(pGpu) || IsAD104(pGpu) || IsAD106(pGpu) ||
           IsAD107(pGpu) || IsGB202(pGpu) || IsGB203(pGpu) ||

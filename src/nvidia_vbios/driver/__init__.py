@@ -40,7 +40,8 @@ CHIP_H = "src/nvidia/generated/g_rmconfig_private.h"
 CHIP_C = "src/nvidia/generated/g_rmconfig_util.c"
 REQUIRED = ("version.mk", GSP, GSP_HEADER, ARGS, REGISTRY, NV, REG_H, OS_REG, PROTO, PCI,
             CHIP_H, CHIP_C, "kernel-open/common/inc/nv.h", "src/nvidia/inc/kernel/core/prelude.h")
-CHIPS = ("GA100", "GA102", "GA103", "GA104", "GA106", "GA107", "AD102", "AD103", "AD104",
+CHIPS = ("TU102", "TU104", "TU106", "TU116", "TU117",
+         "GA100", "GA102", "GA103", "GA104", "GA106", "GA107", "AD102", "AD103", "AD104",
          "AD106", "AD107", "GB202", "GB203", "GB205", "GB206", "GB207")
 
 

@@ -64,6 +64,16 @@ a ~37 KiB prefix that is not sent); anything that does not verify is refused.
 If you try it, please open an issue with the result. GA100 uses different firmware
 and is outside this capacity audit.
 
+**Turing (TU102, TU104, TU106, TU116, TU117), experimental, not tested on any Turing GPU.** The patched
+module accepts these chips, and their GSP firmware (`gsp_tu10x.bin`) has the same override receiver and
+512 KiB limit (found by static analysis of 615.78.08, not on hardware). A single-bank Turing payload sends
+250-355 KB from the legacy image (the file keeps a prefix of up to ~162 KiB that is not sent) and needs no
+relocation: `nvbios normalize edited.rom gpu0.bin`. Vix Editor 0.1.18 or newer also saves
+`<name>-loader-e0end.bin` (`--representation turing-e0-end-v1`), a variant to try when the first file loads
+but the edit does not apply. If GSP refuses an image, the card runs its stock VBIOS. To help, follow the
+[Turing tester guide](https://github.com/Panchovix/nvidia-vbios-vix-editor/blob/main/docs/turing.md): load your unmodified ROM first, then a power-limit edit, and report
+`nvidia-smi -q -d POWER` before and after and the `vbios_override` line of `journalctl -k -b`.
+
 ## Multiple GPUs
 
 Select **1–32 GPUs**, repeating `--device INDEX PAYLOAD` for each one. Indices are
@@ -93,6 +103,7 @@ yet been verified.
   For Ada and Ampere, add the `--representation` given above (`ada-relocated-v1`, `ada-relocated-v2` or
   `ampere-relocated-v1`); without it the payload exceeds the 512 KiB GSP limit and is refused. Vix Editor
   0.1.11 or newer also saves this payload as `<name>-loader.bin` next to an edited Ada or Ampere copy.
+  Turing needs no `--representation` (see above).
 
 ## Window
 

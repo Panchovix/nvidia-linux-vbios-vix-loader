@@ -86,6 +86,20 @@ class ReceiverLimitTests(unittest.TestCase):
                 with self.assertRaisesRegex(payload.PayloadError, '512 KiB.*524289 bytes'):
                     payload.check_loadable_payload(data + b'\xff', 0x10de, device)
 
+    def test_turing_has_the_same_512_kib_receiver_capacity(self):
+        # Found by static emulation of gsp_tu10x.bin 615.78.08; no Turing board has loaded a payload here.
+        for device in (0x1E07, 0x1E84, 0x1F08, 0x1F82, 0x2184):
+            with self.subTest(device=hex(device)):
+                data = bytes(0x28600) + legacy_image(device, blocks=1024)
+                self.assertEqual(payload.check_loadable_payload(data, 0x10de, device), 'turing')
+                with self.assertRaises(payload.PayloadError) as refused:
+                    payload.check_loadable_payload(data + b'\xff', 0x10de, device)
+                self.assertRegex(str(refused.exception), r'Turing TU10x/TU11x GSP accepts at most 512 KiB.*'
+                                                         r'524289 bytes.*after its image chain')
+                # Plain normalize keeps those bytes, so the hint names the export that drops them.
+                self.assertIn('--representation turing-e0-end-v1`', str(refused.exception))
+                self.assertNotIn('payload.bin`', str(refused.exception))
+
     def test_ga100_and_blackwell_do_not_inherit_the_ga10x_capacity(self):
         for device, family in ((0x20b0, 'ampere'), (PRO_6000, 'blackwell-gb20x')):
             with self.subTest(device=hex(device)):

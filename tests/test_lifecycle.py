@@ -780,6 +780,13 @@ class LifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(LifecycleError, "structural validation"):
             self.worker.reconcile(NEW)
 
+    def test_turing_enrollment_is_accepted(self):
+        # Experimental: TU10x/TU11x take the same override path; no Turing board has loaded one.
+        from nvidia_vbios.lifecycle.config import load_config
+        self.config["devices"][0].update(architecture="turing", device=0x1e07)
+        self.write_config()
+        self.assertEqual(load_config(self.worker.config_path, self.root).devices[0]["architecture"], "turing")
+
     def test_external_mutation_is_not_overwritten_by_rollback(self):
         target = self.root / f"usr/lib/modules/{NEW}/updates/vbios-override/nvidia.ko"
         def mutate():

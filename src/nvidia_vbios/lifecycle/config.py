@@ -42,8 +42,8 @@ def load_config(path: Path, root: Path = Path("/"), *, require_enabled: bool = T
             if bdf in seen_bdf or uuid in seen_uuid:
                 raise LifecycleError("duplicate selected GPU")
             seen_bdf.add(bdf); seen_uuid.add(uuid)
-            if device["architecture"] not in ("ampere", "ada", "blackwell-gb20x"):
-                raise LifecycleError("GPU architecture outside Ampere/Ada/consumer-workstation GB20x scope")
+            if device["architecture"] not in ("turing", "ampere", "ada", "blackwell-gb20x"):
+                raise LifecycleError("GPU architecture outside Turing/Ampere/Ada/consumer-workstation GB20x scope")
             representation = device.get("representation")
             if representation not in (None, *REPRESENTATION_FAMILY):
                 raise LifecycleError("unsupported ROM runtime representation")
