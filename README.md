@@ -7,6 +7,10 @@ written. It patches the NVIDIA open kernel modules so the GSP firmware starts wi
 them in a separate boot entry, rebuilds them automatically after kernel updates, and keeps your normal boot
 entry as a fallback.
 
+Works with NVIDIA 615.x (R615) drivers. It may stop working in a future driver if NVIDIA decides to change or
+remove the override, so after every driver update run `nvbios system status` and check an edited value (for
+example the power limits in `nvidia-smi -q -d POWER`).
+
 Thanks to **@pantsoftime** ([overclock.net](https://www.overclock.net)), whose original `vbios_override` patch
 this project is built on. Without it, none of this would have been possible.
 
@@ -92,9 +96,6 @@ yet been verified.
 ## What you need
 
 - A working NVIDIA 615.x (R615) driver with the **open** kernel modules; `nvidia-smi` must list your GPUs.
-  Only 615.x has been tested. A newer driver branch can change the module code the patch applies to, or the
-  GSP firmware that takes the override, so after every driver update run `nvbios system status` and check an
-  edited value (for example the power limits in `nvidia-smi -q -d POWER`).
 - The unpatched source of the open kernel modules for the **exact** installed version, for example:
   `git clone --depth 1 --branch 615.78.08 https://github.com/NVIDIA/open-gpu-kernel-modules`
 - Python 3.11 or newer, the headers for the running kernel (`kernel-devel` on Fedora), `make`, `dracut`,
