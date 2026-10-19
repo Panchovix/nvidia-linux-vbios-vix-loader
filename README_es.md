@@ -94,7 +94,10 @@ todavía no se ha verificado un arranque real con 17 o 32 GPUs.
 
 ## Qué necesitas
 
-- Un driver NVIDIA 615.x funcionando con los módulos **abiertos**; `nvidia-smi` debe listar tus GPUs.
+- Un driver NVIDIA 615.x (R615) funcionando con los módulos **abiertos**; `nvidia-smi` debe listar tus GPUs.
+  Solo se ha probado 615.x. Una rama más nueva del driver puede cambiar el código del módulo que se parchea o
+  el firmware GSP que recibe el reemplazo, así que después de cada actualización del driver revisa
+  `nvbios system status` y un valor editado (por ejemplo los límites de potencia en `nvidia-smi -q -d POWER`).
 - El código fuente sin parchear de los módulos abiertos para la versión instalada **exacta**, por ejemplo:
   `git clone --depth 1 --branch 615.78.08 https://github.com/NVIDIA/open-gpu-kernel-modules`
 - Python 3.11 o superior, los headers del kernel en uso (`kernel-devel` en Fedora), `make`, `dracut`,

@@ -91,7 +91,10 @@ yet been verified.
 
 ## What you need
 
-- A working NVIDIA 615.x driver with the **open** kernel modules; `nvidia-smi` must list your GPUs.
+- A working NVIDIA 615.x (R615) driver with the **open** kernel modules; `nvidia-smi` must list your GPUs.
+  Only 615.x has been tested. A newer driver branch can change the module code the patch applies to, or the
+  GSP firmware that takes the override, so after every driver update run `nvbios system status` and check an
+  edited value (for example the power limits in `nvidia-smi -q -d POWER`).
 - The unpatched source of the open kernel modules for the **exact** installed version, for example:
   `git clone --depth 1 --branch 615.78.08 https://github.com/NVIDIA/open-gpu-kernel-modules`
 - Python 3.11 or newer, the headers for the running kernel (`kernel-devel` on Fedora), `make`, `dracut`,
