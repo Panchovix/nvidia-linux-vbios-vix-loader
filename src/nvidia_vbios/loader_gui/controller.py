@@ -106,6 +106,7 @@ STRINGS = {
         'sum_running': 'A loader command is still running ({verbs}).',
         'sum_service': 'Automatic rebuild running (kernel or driver update). Wait until it finishes.',
         'sum_no_gpu': 'No NVIDIA GPU found.',
+        'sum_uninit': 'The NVIDIA driver did not initialize GPU {gpus} (missing from nvidia-smi).',
         'sum_not_installed': 'Not installed. Choose a file per GPU and press Load.',
         'sum_requested': 'Override requested at boot on GPU {gpus}.',
         'sum_removed': 'Removed. Reboot to return to the normal VBIOS.',
@@ -126,6 +127,13 @@ STRINGS = {
         'blk_no_driver': 'No NVIDIA kernel module is loaded.',
         'blk_no_gpu': 'No NVIDIA GPU found.',
         'blk_smi': 'nvidia-smi does not answer, so the GPUs cannot be matched.',
+        'blk_uninit': 'The NVIDIA driver did not initialize GPU {gpus}, usually because of a VBIOS override it cannot '
+                      'use. Reboot and choose the normal entry in the boot menu, the one without "VBIOS override" in '
+                      'its name (press Esc or hold Shift while the computer starts). Then choose another file or Own '
+                      'VBIOS for that GPU and Load again. Remove override and a reboot also work.',
+        'blk_uninit_other': 'The NVIDIA driver did not initialize GPU {gpus}, so it cannot be matched. Check the '
+                            'kernel log (sudo dmesg | grep NVRM) and whether another driver, such as vfio-pci, uses '
+                            'that GPU.',
         'blk_no_device': 'Choose a file (or keep the current one) for at least one GPU. To go back to the normal VBIOS '
                          'on every GPU, use Remove override.',
         'blk_file': 'GPU {index}: {reason}',
@@ -245,6 +253,8 @@ STRINGS = {
         'hint_smi': 'nvidia-smi does not work: check the driver, then press Refresh.',
         'hint_identity': 'A GPU identity is unavailable (a riser or an Xid 79?): check nvidia-smi and the kernel log.',
         'hint_global': 'An older global override setting in /etc/modprobe.d must be removed first.',
+        'hint_uninit': 'To see the boot menu, press Esc or hold Shift while the computer starts. Remove override and a '
+                       'reboot also work.',
     },
     'es': {
         'title': 'Linux VBIOS Vix Loader',
@@ -326,6 +336,7 @@ STRINGS = {
         'sum_service': 'Recompilación automática en curso (actualización del kernel o del driver). Espera a que '
                        'termine.',
         'sum_no_gpu': 'No se encontró ninguna GPU NVIDIA.',
+        'sum_uninit': 'El driver NVIDIA no inicializó la GPU {gpus} (no aparece en nvidia-smi).',
         'sum_not_installed': 'No instalado. Elige un archivo por GPU y pulsa Cargar.',
         'sum_requested': 'Override pedido al arrancar en la GPU {gpus}.',
         'sum_removed': 'Quitado. Reinicia para volver a la VBIOS normal.',
@@ -349,6 +360,13 @@ STRINGS = {
         'blk_no_driver': 'No hay ningún módulo NVIDIA del kernel cargado.',
         'blk_no_gpu': 'No se encontró ninguna GPU NVIDIA.',
         'blk_smi': 'nvidia-smi no responde, así que no se pueden identificar las GPUs.',
+        'blk_uninit': 'El driver NVIDIA no inicializó la GPU {gpus}, normalmente por un override de VBIOS que no puede '
+                      'usar. Reinicia y elige la entrada normal en el menú de arranque, la que no lleva "VBIOS '
+                      'override" en el nombre (pulsa Esc o mantén Shift mientras el equipo arranca). Luego elige otro '
+                      'archivo o VBIOS propia para esa GPU y vuelve a Cargar. También sirve pulsar Quitar override y '
+                      'reiniciar.',
+        'blk_uninit_other': 'El driver NVIDIA no inicializó la GPU {gpus}, así que no se puede identificar. Revisa el '
+                            'log del kernel (sudo dmesg | grep NVRM) y si otro driver, como vfio-pci, usa esa GPU.',
         'blk_no_device': 'Elige un archivo (o mantén el actual) para al menos una GPU. Para volver a la VBIOS normal '
                          'en todas las GPUs, usa Quitar override.',
         'blk_file': 'GPU {index}: {reason}',
@@ -482,6 +500,11 @@ STRINGS = {
         'hint_identity': 'No está disponible la identidad de una GPU (¿un riser o un Xid 79?): revisa nvidia-smi y el '
                          'log del kernel.',
         'hint_global': 'Primero hay que quitar un ajuste de override global antiguo en /etc/modprobe.d.',
+        'hint_uninit': 'El driver NVIDIA no inicializó esa GPU. Si arrancaste con un override de VBIOS, lo más '
+                       'probable es que no pueda usarlo. Reinicia y elige la entrada normal en el menú de arranque, la '
+                       'que no lleva "VBIOS override" en el nombre (pulsa Esc o mantén Shift mientras el equipo '
+                       'arranca). Luego elige otro archivo o VBIOS propia para esa GPU y vuelve a Cargar. También '
+                       'sirve pulsar Quitar override y reiniciar.',
     },
 }
 
@@ -498,7 +521,8 @@ HINTS = (('lock busy', 'hint_lock'), ('reconciliation service is active', 'hint_
          ('disable every enabled/active trigger', 'hint_remove_first'),
          ('manual nvidia-smi and installed libraries', 'hint_mixed'),
          ('NVIDIA-SMI/NVML GPU discovery failed', 'hint_smi'), ('identity unavailable', 'hint_identity'),
-         ('global VBIOS activation must be migrated', 'hint_global'))
+         ('global VBIOS activation must be migrated', 'hint_global'),
+         ('NVIDIA driver did not initialize', 'hint_uninit'))
 STEPS = ('download', 'prepare', 'preflight', 'disable', 'install', 'enroll', 'reconcile', 'enable')
 # What a failed Load leaves behind, by the step that failed. After a failed enable, setup runs disable and
 # reports that cleanup; without that report the state is unknown.
@@ -706,6 +730,12 @@ class Controller:
         key, fields = error
         return self.text[key].format(**fields)
 
+    def _uninitialized(self):
+        """GPUs on the PCI bus that an answering nvidia-smi leaves out: setup would refuse them."""
+        if not self.snapshot.system.smi:
+            return []
+        return [gpu for gpu in self.snapshot.gpus if gpu.index is None]
+
     def summary(self):
         """(level, text) for the bold line at the top: level is ok, warn or error."""
         t, system = self.text, self.snapshot.system
@@ -716,6 +746,9 @@ class Controller:
             return 'warn', t['sum_service']
         if not self.snapshot.gpus:
             return 'error', t['sum_no_gpu']
+        missing = self._uninitialized()
+        if missing and (system.triggers or not asked):    # after Remove, sum_removed asks for the reboot
+            return 'error', t['sum_uninit'].format(gpus=', '.join(gpu.bdf for gpu in missing))
         if not system.release:
             return 'warn', t['sum_not_installed']
         if asked and system.triggers:
@@ -862,6 +895,10 @@ class Controller:
             found.append(t['blk_proprietary'])
         elif not s.smi:
             found.append(t['blk_smi'])
+        elif missing := self._uninitialized():
+            # The override recovery only when this boot asked the module for an override on such a GPU.
+            key = 'blk_uninit' if any(gpu.requested for gpu in missing) else 'blk_uninit_other'
+            found.append(t[key].format(gpus=', '.join(gpu.bdf for gpu in missing)))
         if s.installed_version is None or s.userspace is None:
             found.append(t['blk_userspace'])
         if s.plugin is False:

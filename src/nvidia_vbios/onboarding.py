@@ -29,6 +29,9 @@ UUID = re.compile(r'GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}')
 BDF = re.compile(r'([0-9a-fA-F]{4}|[0-9a-fA-F]{8}):([0-9a-fA-F]{2}):([01][0-9a-fA-F]\.[0-7])')
 REPRESENTATION = 'ada-relocated-v1'
 MANUAL_LIBRARIES = ['/usr/lib64/libnvidia-ml.so.1', '/usr/lib64/libcuda.so.1']
+# nvidia-smi's exit code when it finds no GPU at all ("No devices were found"; 6 is "a query to find an object
+# was unsuccessful" in its man page).
+SMI_NO_DEVICES = 6
 
 
 def canonical_bdf(value):
@@ -36,6 +39,35 @@ def canonical_bdf(value):
     if match is None or int(match[1], 16) > 0xffff:
         raise BootstrapError(f'invalid physical PCI BDF: {value}')
     return f'{int(match[1], 16):04x}:{match[2].lower()}:{match[3].lower()}'
+
+
+def _listed(stdout):
+    """BDFs in an nvidia-smi answer, read leniently: only to word a refusal, never to accept a GPU."""
+    found = set()
+    for row in csv.reader(stdout.decode('utf-8', 'replace').splitlines()):
+        try:
+            found.add(canonical_bdf(row[1].strip()))
+        except (IndexError, BootstrapError):
+            pass
+    return found
+
+
+def _gpus(names):
+    return ('GPU ' if len(names) == 1 else 'GPUs ') + ', '.join(names)
+
+
+def _not_initialized(records):
+    """The refusal for physical GPUs nvidia-smi does not list, with the recovery."""
+    names = []
+    for record in sorted(records, key=lambda value: value['bdf']):
+        vendor, device = record.get('vendor'), record.get('device')
+        known = all(type(value) is int and 0 <= value <= 0xffff for value in (vendor, device))
+        names.append(f'{record["bdf"]} [{vendor:04x}:{device:04x}]' if known else record['bdf'])
+    them, those = ('it', 'that GPU') if len(names) == 1 else ('them', 'those GPUs')
+    return (f'the NVIDIA driver did not initialize {_gpus(names)}, so nvidia-smi does not list {them} (look for '
+            f'NVRM in dmesg). If you booted a VBIOS override, the driver most likely cannot use it. Reboot, choose '
+            f'the normal boot entry (without "VBIOS override" in its name), then try again with another file for '
+            f'{those} or without an override.')
 
 
 def payload_for(archive, name, gpu, representation=None):
@@ -88,30 +120,39 @@ class Onboarding:
 
     def devices(self):
         response = self._query()
-        if response.returncode:
+        # With no GPU found (one GPU, or every GPU, failed driver init) the physical inventory names them below.
+        none_found = response.returncode == SMI_NO_DEVICES
+        if response.returncode and not none_found:
             raise BootstrapError('NVIDIA-SMI/NVML GPU discovery failed; no index selection is safe')
         actual = self.ops.inventory()
         if not isinstance(actual, dict):
             raise BootstrapError('invalid physical GPU inventory')
-        inventory, uuids = {}, set()
+        listed = _listed(response.stdout)
+        inventory, uuids, uninitialized = {}, set(), {}
         for key, value in actual.items():
             bdf = canonical_bdf(key)
             if not isinstance(value, dict) or canonical_bdf(value.get('bdf', key)) != bdf:
                 raise BootstrapError('conflicting physical inventory BDF')
+            if bdf in inventory or bdf in uninitialized:
+                raise BootstrapError('duplicate physical GPU identity')
             uuid = value.get('uuid')
+            if uuid is None and bdf not in listed:
+                # Neither procfs nor nvidia-smi has a UUID: the driver never initialized this GPU.
+                uninitialized[bdf] = dict(value, bdf=bdf)
+                continue
             if not isinstance(uuid, str) or UUID.fullmatch(uuid) is None:
                 raise BootstrapError('physical procfs GPU UUID is unavailable or invalid')
-            if bdf in inventory or uuid in uuids:
+            if uuid in uuids:
                 raise BootstrapError('duplicate physical GPU identity')
             if value.get('vendor') != 0x10de or type(value.get('device')) is not int or not 0 <= value['device'] <= 0xffff:
                 raise BootstrapError('invalid NVIDIA physical PCI identity')
             inventory[bdf] = dict(value, bdf=bdf)
             uuids.add(uuid)
         try:
-            rows = list(csv.reader(response.stdout.decode('utf-8').splitlines()))
+            rows = [] if none_found else list(csv.reader(response.stdout.decode('utf-8').splitlines()))
         except UnicodeError as exc:
             raise BootstrapError('invalid NVIDIA-SMI discovery text') from exc
-        devices, indices, seen_bdf, seen_uuid = [], set(), set(), set()
+        devices, indices, seen_bdf, seen_uuid, unknown = [], set(), set(), set(), []
         for row in rows:
             if len(row) != 4:
                 raise BootstrapError('unexpected NVIDIA-SMI discovery format')
@@ -121,13 +162,20 @@ class Onboarding:
             index, bdf = int(index), canonical_bdf(supplied_bdf)
             if index in indices or bdf in seen_bdf or uuid in seen_uuid:
                 raise BootstrapError('duplicate NVIDIA-SMI GPU index or identity')
+            indices.add(index); seen_bdf.add(bdf); seen_uuid.add(uuid)
             observed = inventory.get(bdf)
-            if observed is None or observed['uuid'] != uuid:
+            if observed is None:
+                unknown.append(bdf)
+                continue
+            if observed['uuid'] != uuid:
                 raise BootstrapError('NVIDIA-SMI and procfs/sysfs physical GPU identities disagree')
             devices.append(dict(observed, index=index, name=name))
-            indices.add(index); seen_bdf.add(bdf); seen_uuid.add(uuid)
-        if seen_bdf != set(inventory):
-            raise BootstrapError('NVIDIA-SMI and physical inventory GPU sets disagree')
+        if unknown:
+            raise BootstrapError(f'nvidia-smi lists {_gpus(sorted(unknown))} but the physical PCI inventory (sysfs '
+                                 f'and /proc/driver/nvidia) does not, so no GPU selection is safe')
+        missing = [inventory[bdf] for bdf in inventory if bdf not in seen_bdf] + list(uninitialized.values())
+        if missing:
+            raise BootstrapError(_not_initialized(missing))
         if not devices:
             raise BootstrapError('first-use profile discovery requires at least one physical GPU')
         return sorted(devices, key=lambda value: value['index'])

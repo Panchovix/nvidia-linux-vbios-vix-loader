@@ -25,6 +25,7 @@ SECURE_BOOT = 'sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e09
 CURRENT = 'usr/local/lib/nvidia-vbios-tools/current.json'
 SOURCES = 'var/lib/nvidia-vbios/sources'
 NVIDIA_SMI = '/usr/bin/nvidia-smi'
+SMI_NO_DEVICES = 6         # nvidia-smi's exit code for "No devices were found": the driver initialized no GPU
 SYSTEMCTL = '/usr/bin/systemctl'
 # Who owns nvidia-smi decides --userspace: exit 0 means that package manager, anything else a .run install.
 OWNER = {'fedora': (['/usr/bin/rpm', '-qf'], 'rpm'), 'rhel': (['/usr/bin/rpm', '-qf'], 'rpm'),
@@ -40,7 +41,7 @@ class Gpu:
     bdf: str
     vendor: int
     device: int
-    index: int | None          # nvidia-smi index; None when nvidia-smi did not answer
+    index: int | None          # nvidia-smi index; None when nvidia-smi did not answer or leaves this GPU out
     name: str
     serial: str | None
     vbios: str | None
@@ -75,7 +76,7 @@ class System:
     boot_needed: int | None
     saved_source: bool         # an enrolled source snapshot of the installed version exists
     distro_source: bool        # the distribution ships the source of the installed version
-    smi: bool
+    smi: bool                  # nvidia-smi answered: GPU rows, or none found (SMI_NO_DEVICES)
 
 
 @dataclass(frozen=True)
@@ -174,7 +175,8 @@ def gpus(root, run, problems):
         index, name, serial = smi.get(bdf, (None, info.get('Model') or f'10de:{number:04x}', None))
         found.append(Gpu(bdf, vendor, number, index, name, serial, info.get('Video BIOS'), asked.get(bdf),
                          enrolled.get(bdf)))
-    return tuple(sorted(found, key=lambda gpu: (gpu.index is None, gpu.index or 0, gpu.bdf))), bool(smi)
+    return (tuple(sorted(found, key=lambda gpu: (gpu.index is None, gpu.index or 0, gpu.bdf))),
+            bool(smi) or code == SMI_NO_DEVICES)
 
 
 def _release(root, checkout, problems):

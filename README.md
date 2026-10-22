@@ -215,9 +215,15 @@ expanded GPU count merely by downloading this repository.
 
 ## If something goes wrong
 
-- Choose your **normal** entry in the boot menu; it does not load any override. It still uses the modules this tool
-  built, so it does not help after a driver update without `post-install` (see above).
+- Choose your **normal** entry in the boot menu (press Esc or hold Shift while the computer starts); it does not
+  load any override. It still uses the modules this tool built, so it does not help after a driver update without
+  `post-install` (see above).
 - `sudo nvbios system disable` stops automatic rebuilds and restores the normal entry as default.
+- If `nvidia-smi` stops listing a GPU after you boot an override, the NVIDIA driver most likely could not use that
+  GPU's override (`sudo dmesg | grep NVRM` shows the error). The loader then refuses to load ("NVIDIA driver did not
+  initialize GPU ..."). Reboot and choose the **normal** entry (without "VBIOS override" in its name), then pick
+  another file or **Own VBIOS (no override)** for that GPU and press **Load**. **Remove override** and a reboot also
+  work.
 - `sudo nvbios system rollback TRANSACTION_ID` undoes one install, enroll or enable step; the IDs are printed
   by those commands.
 

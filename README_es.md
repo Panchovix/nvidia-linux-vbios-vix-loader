@@ -219,10 +219,16 @@ amplía el límite del runtime o módulo que ya tenías instalado.
 
 ## Si algo sale mal
 
-- Elige tu entrada **normal** en el menú de arranque; no carga ningún override. Igual usa los módulos que compiló
-  esta herramienta, así que no sirve tras una actualización del driver sin `post-install` (ver arriba).
+- Elige tu entrada **normal** en el menú de arranque (pulsa Esc o mantén Shift mientras el equipo arranca); no
+  carga ningún override. Igual usa los módulos que compiló esta herramienta, así que no sirve tras una
+  actualización del driver sin `post-install` (ver arriba).
 - `sudo nvbios system disable` detiene las recompilaciones automáticas y vuelve a dejar la entrada normal como
   predeterminada.
+- Si `nvidia-smi` deja de mostrar una GPU después de arrancar con un override, lo más probable es que el driver
+  NVIDIA no haya podido usar el override de esa GPU (`sudo dmesg | grep NVRM` muestra el error). Entonces el loader
+  se niega a cargar ("El driver NVIDIA no inicializó la GPU ..." en la ventana). Reinicia y elige la entrada
+  **normal** (sin "VBIOS override" en el nombre). Luego elige otro archivo o **VBIOS propia (sin override)** para esa
+  GPU y pulsa **Cargar**. **Quitar override** y reiniciar también sirve.
 - `sudo nvbios system rollback ID_TRANSACCION` deshace un paso de install, enroll o enable; esos comandos
   muestran el ID.
 

@@ -141,6 +141,28 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual((first.requested, second.requested), ('0123456789abcdef', None))
         self.assertEqual(result.problems, ())
 
+    def test_gpu_nvidia_smi_leaves_out_stays_listed_without_an_index(self):
+        # The driver did not initialize 13:00.0: sysfs still has it, nvidia-smi lists only 03:00.0.
+        run = FakeRun()
+        run.answers[('/usr/bin/nvidia-smi', '--query-gpu=index,pci.bus_id,name,serial', '--format=csv,noheader')] = \
+            (0, SMI.splitlines()[0] + '\n')
+        result = self.snapshot(run)
+        self.assertTrue(result.system.smi)
+        self.assertEqual([(gpu.bdf, gpu.index, gpu.name) for gpu in result.gpus],
+                         [('0000:03:00.0', 0, 'NVIDIA RTX PRO 6000 Blackwell'), ('0000:13:00.0', None, '10de:28b0')])
+
+    def test_no_devices_found_is_an_nvidia_smi_answer(self):
+        # Exit 6 ("No devices were found"): the driver initialized no GPU, every GPU stays listed without an index.
+        run = FakeRun()
+        query = ('/usr/bin/nvidia-smi', '--query-gpu=index,pci.bus_id,name,serial', '--format=csv,noheader')
+        run.answers[query] = (6, 'No devices were found\n')
+        result = self.snapshot(run)
+        self.assertTrue(result.system.smi)
+        self.assertEqual([(gpu.bdf, gpu.index) for gpu in result.gpus],
+                         [('0000:03:00.0', None), ('0000:13:00.0', None)])
+        run.answers[query] = (9, '')                     # any other failure is not an answer
+        self.assertFalse(self.snapshot(run).system.smi)
+
     def test_system_state(self):
         run = FakeRun()
         s = self.snapshot(run).system
@@ -459,6 +481,77 @@ class ControllerTests(unittest.TestCase):
         for snap, expected in cases:
             with self.subTest(expected=expected):
                 self.assertEqual(self.controller(snap).summary(), expected)
+
+    def test_gpu_the_driver_did_not_initialize(self):
+        # On the PCI bus, but nvidia-smi lists only the other GPU: setup's prepare would refuse it.
+        missing = replace(GPU1, index=None, name='NVIDIA RTX 2000 Ada Generation', requested='fedcba9876543210')
+        snap = snapshot(gpus=(GPU0, missing), release='cd' * 32, release_has_setup=True, triggers=True)
+        c = self.ready(snap)
+        self.assertEqual(c.summary(), ('error', 'The NVIDIA driver did not initialize GPU 0000:13:00.0 (missing from '
+                                                'nvidia-smi).'))
+        self.assertEqual(c.load_blockers(), [
+            'The NVIDIA driver did not initialize GPU 0000:13:00.0, usually because of a VBIOS override it cannot '
+            'use. Reboot and choose the normal entry in the boot menu, the one without "VBIOS override" in its name '
+            '(press Esc or hold Shift while the computer starts). Then choose another file or Own VBIOS for that GPU '
+            'and Load again. Remove override and a reboot also work.'])
+        self.assertFalse(c.can_load())
+        self.assertTrue(c.can_remove())                  # disable never needs the GPU list
+        self.assertEqual(c.gpu_view(missing)['title'], '#? NVIDIA RTX 2000 Ada Generation')
+        self.assertTrue(c.set_language('es'))
+        self.assertEqual(c.summary()[1], 'El driver NVIDIA no inicializó la GPU 0000:13:00.0 (no aparece en '
+                                         'nvidia-smi).')
+        self.assertEqual(c.load_blockers(), [
+            'El driver NVIDIA no inicializó la GPU 0000:13:00.0, normalmente por un override de VBIOS que no puede '
+            'usar. Reinicia y elige la entrada normal en el menú de arranque, la que no lleva "VBIOS override" en el '
+            'nombre (pulsa Esc o mantén Shift mientras el equipo arranca). Luego elige otro archivo o VBIOS propia '
+            'para esa GPU y vuelve a Cargar. También sirve pulsar Quitar override y reiniciar.'])
+        # After Remove (triggers off) the summary keeps asking for the reboot; Load stays blocked until then.
+        c = self.ready(replace(snap, system=replace(snap.system, triggers=False)))
+        self.assertEqual(c.summary(), ('warn', 'Removed. Reboot to return to the normal VBIOS.'))
+        self.assertTrue(c.load_blockers()[0].startswith('The NVIDIA driver did not initialize GPU 0000:13:00.0, '
+                                                        'usually because of a VBIOS override'))
+        # No override asked at this boot (a first use, or vfio-pci): nothing blames an override.
+        c = self.ready(snapshot(gpus=(GPU0, replace(missing, requested=None))))
+        self.assertEqual(c.summary(), ('error', 'The NVIDIA driver did not initialize GPU 0000:13:00.0 (missing from '
+                                                'nvidia-smi).'))
+        self.assertEqual(c.load_blockers(), [
+            'The NVIDIA driver did not initialize GPU 0000:13:00.0, so it cannot be matched. Check the kernel log '
+            '(sudo dmesg | grep NVRM) and whether another driver, such as vfio-pci, uses that GPU.'])
+        self.assertTrue(c.set_language('es'))
+        self.assertEqual(c.load_blockers(), [
+            'El driver NVIDIA no inicializó la GPU 0000:13:00.0, así que no se puede identificar. Revisa el log del '
+            'kernel (sudo dmesg | grep NVRM) y si otro driver, como vfio-pci, usa esa GPU.'])
+        # nvidia-smi found no GPU at all (exit 6, a one-GPU system): every GPU is named.
+        c = self.ready(snapshot(gpus=(replace(GPU0, index=None, requested='0123456789abcdef'), missing),
+                                release='cd' * 32, release_has_setup=True, triggers=True))
+        self.assertEqual(c.summary(), ('error', 'The NVIDIA driver did not initialize GPU 0000:03:00.0, 0000:13:00.0 '
+                                                '(missing from nvidia-smi).'))
+        self.assertTrue(c.load_blockers()[0].startswith('The NVIDIA driver did not initialize GPU 0000:03:00.0, '
+                                                        '0000:13:00.0, usually because of a VBIOS override'))
+        # Without any nvidia-smi answer every index is unknown: that is the nvidia-smi blocker, not this one.
+        c = self.ready(snapshot(gpus=(replace(GPU0, index=None), missing), smi=False))
+        self.assertEqual(c.load_blockers(), ['nvidia-smi does not answer, so the GPUs cannot be matched.'])
+        self.assertEqual(c.summary(), ('warn', 'Not installed. Choose a file per GPU and press Load.'))
+
+    def test_setup_refusal_for_an_uninitialized_gpu_gets_the_window_hint(self):
+        message = ('PREPARE_BLOCKED: the NVIDIA driver did not initialize GPU 0000:13:00.0 [10de:28b0], so '
+                   'nvidia-smi does not list it (look for NVRM in dmesg). If you booted a VBIOS override, the driver '
+                   'most likely cannot use it. Reboot, choose the normal boot entry (without "VBIOS override" in its '
+                   'name), then try again with another file for that GPU or without an override.')
+        failed = {'event': 'failed', 'step': 'prepare', 'message': message,
+                  'cleanup': {'ran': False, 'ok': None, 'message': None}}
+        result = self.finish_load(self.ready(), 1, f'SETUP_BLOCKED: prepare: {message}\n', failed)
+        self.assertEqual(result.lines, [f'Load failed at "Checking the files and the system": {message} To see the '
+                                        'boot menu, press Esc or hold Shift while the computer starts. Remove '
+                                        'override and a reboot also work.', 'Nothing was changed.'])
+        c = self.ready(language='es')
+        lines = self.finish_load(c, 1, f'SETUP_BLOCKED: prepare: {message}\n', failed).lines
+        self.assertTrue(lines[0].endswith(f'{message} El driver NVIDIA no inicializó esa GPU. Si arrancaste con un '
+                                          'override de VBIOS, lo más probable es que no pueda usarlo. Reinicia y '
+                                          'elige la entrada normal en el menú de arranque, la que no lleva "VBIOS '
+                                          'override" en el nombre (pulsa Esc o mantén Shift mientras el equipo '
+                                          'arranca). Luego elige otro archivo o VBIOS propia para esa GPU y vuelve a '
+                                          'Cargar. También sirve pulsar Quitar override y reiniciar.'), lines[0])
 
     def test_system_rows(self):
         rows = self.controller(snapshot(loaded_version='615.71.09', newest_kernel=NEWER, boot_free=200 * 2 ** 20,
