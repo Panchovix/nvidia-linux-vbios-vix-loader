@@ -170,6 +170,18 @@ class BootstrapOperations:
         self.system._run(['systemctl', 'daemon-reload'])
         self.system._run(['systemctl', 'enable' if enabled else 'disable', '--now', *UNITS])
 
+    def retire_triggers(self):
+        """Uninstall: stop the path, the timer and a service run they started since the check, which can only wait for
+        the locks uninstall holds; disable the path and timer. A missing or masked unit is no error. Without a running
+        systemd (a chroot without /run) nothing runs: uninstall unlinks the enable links itself."""
+        if Path('/run/systemd/system').is_dir():
+            self.system._run(['systemctl', 'stop', *UNITS, 'nvidia-vbios-reconcile.service'], allow_failure=True)
+            self.system._run(['systemctl', 'disable', *UNITS], allow_failure=True)
+
+    def daemon_reload(self):
+        if Path('/run/systemd/system').is_dir():
+            self.system._run(['systemctl', 'daemon-reload'], allow_failure=True)
+
     def triggers_enabled(self):
         return all(self.system._run(['systemctl', 'is-enabled', name], allow_failure=True).returncode == 0 for name in UNITS)
 
@@ -222,6 +234,9 @@ class Bootstrap:
             operations = BootstrapOperations()
         self.ops = operations
         checked_path(self.root, self.root)
+        self._boot_operations()
+
+    def _boot_operations(self):
         configuration = self._read(CONFIG)
         if configuration.get('boot'):
             from .lifecycle.portable import operations_for

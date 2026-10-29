@@ -16,6 +16,7 @@ COMMANDS = {
     "bootctl": "/usr/bin/bootctl", "grub-script-check": "/usr/bin/grub-script-check",
     "grub-mkconfig": "/usr/sbin/grub-mkconfig", "update-grub": "/usr/sbin/update-grub",
     "mkinitramfs": "/usr/sbin/mkinitramfs", "unmkinitramfs": "/usr/sbin/unmkinitramfs",
+    "update-initramfs": "/usr/sbin/update-initramfs",
     "mkinitcpio": "/usr/bin/mkinitcpio", "lsinitcpio": "/usr/bin/lsinitcpio",
     "ukify": "/usr/lib/systemd/ukify", "objcopy": "/usr/bin/objcopy",
     "sbverify": "/usr/bin/sbverify", "efi-readvar": "/usr/bin/efi-readvar", "openssl": "/usr/bin/openssl",
@@ -471,6 +472,10 @@ class SystemOperations:
 
     def depmod(self, kernel):
         self._run(["depmod", "-a", kernel])
+
+    def regenerate_initramfs(self, kernel, raw, image=None):
+        from .engine import regenerate_argv
+        self._run(regenerate_argv(raw, token(kernel), image), timeout=3600)
 
     def selected_module(self, kernel, name):
         return self._text(["modinfo", "-k", kernel, "-F", "filename", name])

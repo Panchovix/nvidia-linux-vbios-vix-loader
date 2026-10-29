@@ -31,7 +31,7 @@ SYSTEMCTL = '/usr/bin/systemctl'
 OWNER = {'fedora': (['/usr/bin/rpm', '-qf'], 'rpm'), 'rhel': (['/usr/bin/rpm', '-qf'], 'rpm'),
          'debian': (['/usr/bin/dpkg-query', '-S'], 'deb'), 'arch': (['/usr/bin/pacman', '-Qoq'], 'pacman')}
 # `nvbios system VERB` processes that change the system; a Load now would find their locks busy.
-VERBS = ('setup', 'install', 'enroll', 'reconcile', 'enable', 'disable', 'pre-install', 'post-install')
+VERBS = ('setup', 'install', 'enroll', 'reconcile', 'enable', 'disable', 'pre-install', 'post-install', 'uninstall')
 # Code files `nvbios system install` copies into a release (bootstrap.py install).
 RELEASE_SUFFIXES = ('.py', '.json', '.patch', '.c', '.h')
 

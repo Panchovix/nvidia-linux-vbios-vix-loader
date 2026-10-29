@@ -741,7 +741,7 @@ class ControllerTests(unittest.TestCase):
                          hashlib.sha256(self.gpu0.read_bytes()).hexdigest())
         self.gpu0.write_bytes(b'')
         self.assertIsNone(c.confirm_load())
-        self.assertIn('There is no uninstall.', c.confirm_remove())
+        self.assertIn('To remove the loader completely, see Uninstall in the README.', c.confirm_remove())
 
     def test_language(self):
         c = self.controller(language='es')

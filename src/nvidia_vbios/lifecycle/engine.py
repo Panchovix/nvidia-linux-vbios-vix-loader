@@ -26,11 +26,19 @@ MODULE_STRING_MAX_BYTES = REGISTRY_STRING_MAX_BYTES
 ACTIVATION_GENERATION = 4
 
 
-def regenerate_command(raw, kernel):
-    """The distribution command that rebuilds the normal initramfs of `kernel`."""
+def regenerate_argv(raw, kernel, image=None):
+    """The distribution command that rebuilds the normal initramfs of `kernel`; dracut writes `image` when given
+    (its default name is Fedora's, not Debian's initrd.img-KERNEL)."""
     builder = raw.get("boot", {}).get("initramfs", "dracut")
-    return {"initramfs-tools": f"update-initramfs -u -k {kernel}", "mkinitcpio": "mkinitcpio -P"}.get(
-        builder, f"dracut -f --kver {kernel}")
+    if builder == "initramfs-tools":
+        return ["update-initramfs", "-u", "-k", kernel]
+    if builder == "mkinitcpio":
+        return ["mkinitcpio", "-P"]
+    return ["dracut", "-f", image, kernel] if image else ["dracut", "-f", "--kver", kernel]
+
+
+def regenerate_command(raw, kernel, image=None):
+    return " ".join(regenerate_argv(raw, kernel, image))
 
 
 def firmware_filename(device):

@@ -166,7 +166,8 @@ STRINGS = {
                 'menu (press Esc or hold Shift while the computer starts), then press Remove override here.',
         'confirm_remove': 'The normal entry becomes the default and automatic rebuilds stop.\n\nThe override entry '
                           'stays in the boot menu (you can still pick it by hand). The built modules stay installed; '
-                          'the normal entry does not load the override. There is no uninstall.\n\nReboot to return to '
+                          'the normal entry does not load the override. To remove the loader completely, see '
+                          'Uninstall in the README.\n\nReboot to return to '
                           'the stock VBIOS. Your password is asked once.',
         'step_download': 'Downloading the NVIDIA source {version}',
         'step_prepare': 'Checking the files and the system',
@@ -404,7 +405,8 @@ STRINGS = {
         'confirm_remove': 'La entrada normal queda como predeterminada y se detienen las recompilaciones '
                           'automáticas.\n\nLa entrada de override sigue en el menú de arranque (puedes elegirla a '
                           'mano). Los módulos compilados quedan instalados; la entrada normal no carga el override. '
-                          'No hay desinstalación.\n\nReinicia para volver a la VBIOS de fábrica. La contraseña se pide '
+                          'Para quitar el loader por completo, ver Desinstalar en el README.\n\nReinicia para volver a '
+                          'la VBIOS de fábrica. La contraseña se pide '
                           'una sola vez.',
         'step_download': 'Descargando el código fuente de NVIDIA {version}',
         'step_prepare': 'Revisando los archivos y el sistema',

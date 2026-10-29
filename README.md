@@ -29,7 +29,7 @@ Corporation.
 | Platform | State |
 | --- | --- |
 | Fedora 43, GRUB/BLS, dracut, DNF5, NVIDIA 615.x open kernel modules installed with the `.run` installer | **Supported**: used on real hardware |
-| RHEL family, Debian/Ubuntu, Arch/CachyOS/EndeavourOS, systemd-boot, UKI, Secure Boot (all with the `.run` driver) | **Experimental**: synthetic and container tests only |
+| RHEL family, Debian/Ubuntu, Arch/CachyOS/EndeavourOS, systemd-boot, UKI, Secure Boot (all with the `.run` driver) | **Experimental**: users report it working on Ubuntu, Kubuntu, Debian, CachyOS and Arch Linux; the maintainer only uses Fedora |
 | NVIDIA drivers from a package manager (RPM Fusion, NVIDIA repos, apt, pacman), open kernel modules 615+ | **Experimental**: synthetic tests only |
 | rpm-ostree, proprietary NVIDIA kernel modules, drivers older than 615 | Not supported |
 
@@ -219,6 +219,7 @@ expanded GPU count merely by downloading this repository.
   load any override. It still uses the modules this tool built, so it does not help after a driver update without
   `post-install` (see above).
 - `sudo nvbios system disable` stops automatic rebuilds and restores the normal entry as default.
+- To remove the loader completely, see [Uninstall](#uninstall).
 - If `nvidia-smi` stops listing a GPU after you boot an override, the NVIDIA driver most likely could not use that
   GPU's override (`sudo dmesg | grep NVRM` shows the error). The loader then refuses to load ("NVIDIA driver did not
   initialize GPU ..."). Reboot and choose the **normal** entry (without "VBIOS override" in its name), then pick
@@ -227,26 +228,104 @@ expanded GPU count merely by downloading this repository.
 - `sudo nvbios system rollback TRANSACTION_ID` undoes one install, enroll or enable step; the IDs are printed
   by those commands.
 
-## Uninstall (Fedora)
+## Uninstall
 
-There is no uninstall command yet. After a kernel update, the modules this tool builds can be the **only** NVIDIA
-kernel modules for that kernel, and the normal boot entry may load them too. Restore normal modules first:
+Run it from an up-to-date clone of this repository: an installed `/usr/local/bin/nvbios` has the command only when it
+was installed from this version or a later one.
 
-1. `sudo nvbios system disable`.
-2. For every kernel you keep, install normal NVIDIA modules of the same driver version: re-run the NVIDIA `.run`
-   installer for that kernel (`--kernel-name=KERNEL`). Then
-   rebuild its normal initramfs with `sudo dracut -f --kver KERNEL`.
-3. Temporarily move `/usr/lib/modules/*/updates/vbios-override` aside (for example to `/var/backups/vbios-override`),
-   run `sudo depmod -a KERNEL` for each kernel, reboot into the normal entry and check that `nvidia-smi` works.
-4. Only then remove the backup and:
-   - `/usr/local/bin/nvbios`, `/usr/libexec/nvidia-vbios` and `/usr/local/lib/nvidia-vbios-tools`
-   - `/etc/nvidia-vbios` and `/var/lib/nvidia-vbios`
-   - `/usr/lib/systemd/system/nvidia-vbios-reconcile.{service,path,timer}`, then `sudo systemctl daemon-reload`
-   - `/usr/lib/kernel/install.d/99-nvidia-vbios.install` and `/etc/dnf/libdnf5-plugins/actions.d/nvidia-vbios.actions`
-   - the managed boot files `/boot/loader/entries/vbios-*.conf` and `/boot/initramfs-*-vbios-*.img`
-   - `/usr/lib/firmware/nvidia/*/vbios-override`
+```sh
+sudo ./nvbios system uninstall --dry-run
+sudo ./nvbios system uninstall
+```
 
-If `nvidia-smi` fails in step 3, move the directory back, run `depmod -a KERNEL` again and fix step 2 first.
+The command is new and has only been tested on synthetic systems so far. Run `--dry-run` first, and if anything in
+its output looks wrong, open an issue with that output before running it for real.
+
+`--dry-run` lists what would be removed and changes nothing. Uninstall works on every distribution and boot setup this
+tool supports, and it needs neither the GPU nor a working NVIDIA driver, so it also works after the driver was removed
+or replaced. In order, it:
+
+1. Removes the package, kernel and systemd hooks, so nothing builds the override again.
+2. With GRUB, makes a normal entry the default, preferring kernels that keep an NVIDIA driver: on Fedora the entry of
+   the override's kernel, elsewhere the newest kernel's (the menu's top entry, which follows later kernels). With
+   systemd-boot, clears the override default. A default you chose yourself, such as another system, stays.
+3. Removes the override boot entries and their images.
+4. Removes the modules it built, runs `depmod`, and rebuilds a kernel's normal initramfs if it contains them. A normal
+   UKI that contains them is left to the tool that made it, unless that is mkinitcpio: uninstall names the command
+   (such as `kernel-install add KERNEL /usr/lib/modules/KERNEL/vmlinuz`) and finishes when run again.
+5. Removes the VBIOS files it gave the driver, its state (`/etc/nvidia-vbios/lifecycle.json` and
+   `/var/lib/nvidia-vbios`) and, last, `nvbios` itself.
+
+On GRUB systems other than Fedora, `GRUB_DEFAULT=saved` stays in `/etc/default/grub`. If you set it only for the
+loader, set `GRUB_DEFAULT=0` again and run `sudo update-grub` (or `sudo grub-mkconfig -o /boot/grub/grub.cfg`) and
+`sudo grub-set-default 0`.
+
+It deletes only the loader's own files; anything else it finds is listed under `kept`. On a boot or EFI partition
+shared with another system that also uses the loader, that system's entries and images are kept as well. The enrolled
+payloads in `/var/lib/nvidia-vbios/roms` are deleted too, so copy that folder first if you need them. Your signing
+keys and your Secure Boot key (MOK) are not touched. If it stops halfway, it says why and keeps what it needs to
+finish: fix that and run it again. Running it twice is harmless. Reboot when it is done, before suspending or using
+CUDA.
+
+The modules this tool builds can be the **only** NVIDIA kernel modules of a kernel, for example a kernel installed
+after a `.run` driver. Uninstall then stops before changing anything and names that kernel. Install the driver's own
+module for it and run uninstall again:
+
+- `.run` driver: `sudo sh NVIDIA-Linux-x86_64-VERSION.run --kernel-module-only --kernel-name=KERNEL`, with the
+  version of the installed driver.
+- Package-manager driver: reinstall its kernel module package, or rebuild the module with
+  `sudo akmods --force --kernels KERNEL`. DKMS can refuse to install over the loader's module: use
+  `sudo dkms install --force NAME/VERSION -k KERNEL`, with the name and version `dkms status` lists, or run uninstall
+  with `--allow-missing-module` and then `sudo dkms autoinstall -k KERNEL`.
+
+`--allow-missing-module` removes them anyway; that kernel then starts without the NVIDIA driver until you install one.
+
+### If the computer no longer starts
+
+- GRUB: open the boot menu (press Esc or hold Shift while the computer starts), select the normal entry (without
+  "VBIOS override" in its name), press `e`, add `module_blacklist=nvidia,nvidia_drm,nvidia_modeset,nvidia_uvm,nvidia_peermem`
+  at the end of the `linux` line and start it with Ctrl+X or F10. With systemd-boot, select the normal entry, press
+  `e`, add the same text and press Enter. NVIDIA stays off for that boot only. Then run the uninstall from a clone.
+- Recovery mode works too: first run `mount -o remount,rw /` and, if `/boot` or the EFI partition is separate,
+  `mount -a`. The clone must already be on the computer, or turn on networking in the recovery menu to download it.
+- From a live USB (the only way with a signed UKI, whose command line cannot be edited): mount the installed system on
+  `/mnt`, with `/boot` and the EFI partition at their usual places below it, copy this repository (a clone or the
+  extracted ZIP from GitHub) to `/mnt/opt/vix-loader`, then run:
+
+  ```sh
+  for d in dev proc sys run; do sudo mount --rbind /$d /mnt/$d; done
+  sudo chroot /mnt /usr/bin/python3 /opt/vix-loader/nvbios system uninstall
+  ```
+
+### Manual removal
+
+Only if the command cannot run at all. As root:
+
+1. `systemctl disable --now nvidia-vbios-reconcile.path nvidia-vbios-reconcile.timer` (in a chroot, without `--now`).
+   Delete whichever of these exist, then run `systemctl daemon-reload`:
+   `/usr/lib/systemd/system/nvidia-vbios-reconcile.{service,path,timer}`,
+   `/usr/lib/kernel/install.d/99-nvidia-vbios.install`, `/etc/kernel/postinst.d/zz-nvidia-vbios`,
+   `/etc/kernel/postrm.d/zz-nvidia-vbios`, `/etc/apt/apt.conf.d/99-nvidia-vbios`,
+   `/etc/pacman.d/hooks/99-nvidia-vbios.hook`, `/etc/dnf/libdnf5-plugins/actions.d/nvidia-vbios.actions` and
+   `/etc/dnf/plugins/post-transaction-actions.d/nvidia-vbios.action`.
+2. Make a normal entry the default: `grub2-set-default 0` (Fedora), `grub-set-default 0` (other GRUB systems) or
+   `bootctl set-default ""` (systemd-boot).
+3. Delete the override boot files. On Fedora: `/boot/loader/entries/vbios-*.conf` and `/boot/initramfs-*-vbios-*.img`.
+   Elsewhere: `/etc/grub.d/41_nvidia_vbios`, `/boot/grub/nvidia-vbios-entries`, and on `/boot` or the EFI partition
+   the `nvidia-vbios` folder and the `vbios-*` files in `loader/entries` or `EFI/Linux` (if another system on the
+   computer also uses the loader, only the `vbios-*` folders and files of this system's kernels). With GRUB, then
+   delete `/boot/grub/nvidia-vbios.cfg` and run `update-grub` (or `grub-mkconfig -o /boot/grub/grub.cfg`). With a
+   hand-written `grub.cfg`, run neither: delete its line `source $prefix/nvidia-vbios.cfg`, then
+   `/boot/grub/nvidia-vbios.cfg`.
+4. Move each `/usr/lib/modules/KERNEL/updates/vbios-override` to a backup folder of its own (for example
+   `/var/backups/vbios-override-KERNEL`), and `/usr/lib/modules/.vbios-*` too. Run `depmod -a KERNEL` for every
+   installed kernel and check that `modinfo -k KERNEL -F filename nvidia` prints a module (if not, see above, or move
+   that kernel's folder back and run `depmod -a KERNEL` again).
+5. Rebuild the normal initramfs: `dracut -f --kver KERNEL`, `update-initramfs -u -k all` or `mkinitcpio -P`.
+6. Delete `/usr/lib/firmware/nvidia/*/vbios-override`, `/usr/local/bin/nvbios`, `/usr/libexec/nvidia-vbios`,
+   `/usr/local/lib/nvidia-vbios-tools`, `/etc/nvidia-vbios` and `/var/lib/nvidia-vbios`. First move out any key you
+   keep in `/etc/nvidia-vbios`, and copy `/var/lib/nvidia-vbios/roms` if you want the payloads. Reboot, check that
+   `nvidia-smi` works, then delete the module backups.
 
 ## Tests
 

@@ -24,6 +24,21 @@ def portable_config(raw):
     return isinstance(raw.get('boot'), dict) and raw['boot'].get('backend') in ('grub', 'systemd-boot', 'uki')
 
 
+def efi_variable(root, variable):
+    """A systemd-boot EFI variable as text; '' when it is unset or efivarfs is not mounted."""
+    path = Path(root) / f'sys/firmware/efi/efivars/{variable}-{EFI_GUID}'
+    if not path.exists():
+        return ''
+    checked_path(path, Path(root))
+    data = path.read_bytes()
+    if len(data) < 4 or (len(data) - 4) % 2:
+        raise LifecycleError('invalid boot-loader EFI variable')
+    try:
+        return data[4:].decode('utf-16-le').rstrip('\0')
+    except UnicodeError as exc:
+        raise LifecycleError('invalid boot-loader EFI variable text') from exc
+
+
 class BootOperations:
     """Normalize boot selection; delegate all source/module operations unchanged."""
     def __init__(self, base, root, raw):
@@ -36,17 +51,7 @@ class BootOperations:
         return getattr(self.base, name)
 
     def _efi(self, variable):
-        path = self.root / f'sys/firmware/efi/efivars/{variable}-{EFI_GUID}'
-        if not path.exists():
-            return ''
-        checked_path(path, self.root)
-        data = path.read_bytes()
-        if len(data) < 4 or (len(data) - 4) % 2:
-            raise LifecycleError('invalid boot-loader EFI variable')
-        try:
-            return data[4:].decode('utf-16-le').rstrip('\0')
-        except UnicodeError as exc:
-            raise LifecycleError('invalid boot-loader EFI variable text') from exc
+        return efi_variable(self.root, variable)
 
     def grub_environment(self):
         if self.boot.backend == 'grub' or not hasattr(self.base, '_run'):
