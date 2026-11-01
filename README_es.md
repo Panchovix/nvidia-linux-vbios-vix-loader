@@ -30,7 +30,7 @@ de NVIDIA Corporation.
 | --- | --- |
 | Fedora 43, GRUB/BLS, dracut, DNF5, módulos abiertos NVIDIA 615.x instalados con el instalador `.run` | **Soportado**: usado en hardware real |
 | Familia RHEL, Debian/Ubuntu, Arch/CachyOS/EndeavourOS, systemd-boot, UKI, Secure Boot (todos con el driver `.run`) | **Experimental**: usuarios reportan que funciona en Ubuntu, Kubuntu, Debian, CachyOS y Arch Linux; el mantenedor solo usa Fedora |
-| Drivers NVIDIA de un gestor de paquetes (RPM Fusion, repositorios de NVIDIA, apt, pacman), módulos abiertos 615+ | **Experimental**: solo pruebas sintéticas |
+| Drivers NVIDIA de un gestor de paquetes (RPM Fusion, repositorios de NVIDIA, apt, pacman), módulos abiertos 615+ | **Experimental**: un usuario reporta que funciona en Ubuntu 26.04 con apt, con el código fuente registrado a mano; la descarga automática tras una actualización del driver solo tiene pruebas sintéticas |
 | rpm-ostree, módulos de kernel propietarios de NVIDIA, drivers anteriores a 615 | No soportado |
 
 Tras una actualización del driver con un gestor de paquetes, el loader descarga una vez el tag correspondiente de
@@ -102,8 +102,14 @@ todavía no se ha verificado un arranque real con 17 o 32 GPUs.
 - El código fuente sin parchear de los módulos abiertos para la versión instalada **exacta**, por ejemplo:
   `git clone --depth 1 --branch 615.78.08 https://github.com/NVIDIA/open-gpu-kernel-modules`
 - Python 3.11 o superior, los headers del kernel en uso (`kernel-devel` en Fedora), `make`, `dracut`,
-  `grub2-editenv` y `mokutil`. Con DNF5, también `libdnf5-plugin-actions`.
-- GRUB con `GRUB_DEFAULT=saved` y `GRUB_ENABLE_BLSCFG=true` (lo normal en Fedora).
+  `grub2-editenv` y `mokutil`. Con DNF5, también `libdnf5-plugin-actions`. Para las correcciones de compilación del
+  DKMS de una distribución (paso 4 de Instalación), también GNU `patch`, que Ubuntu instala junto con `dkms`.
+- GRUB con `GRUB_DEFAULT=saved` y `GRUB_ENABLE_BLSCFG=true` (lo normal en Fedora). En otros sistemas con GRUB
+  (Ubuntu, Debian), pon `GRUB_DEFAULT=saved` en `/etc/default/grub` y ejecuta `sudo update-grub`. Deja la entrada
+  guardada sin definir o defínela por su id, nunca por su posición en el menú: después de `sudo grub-set-default 0`,
+  `reconcile` se detiene con `foreign or unrelated boot default preserved`. El id que corresponde es el de la entrada
+  normal que `prepare` guarda como `fallback_entry` en el perfil (en Ubuntu, `gnulinux-simple-` seguido del UUID del
+  sistema de archivos raíz).
 - Secure Boot desactivado, o tu propia clave para firmar módulos: pasa `--signing-key` y `--signing-certificate` a `prepare`.
 - Un **payload** de VBIOS por GPU: una imagen de una sola cadena para esa tarjeta exacta. Los volcados de ROM
   completos con dos bancos se rechazan. Con la herramienta de línea de comandos de Vix Editor:
@@ -157,7 +163,8 @@ Ejecuta esto desde un clon de este repositorio.
      --userspace manual --output "$PWD/gpu-profile"
    ```
 
-   También puedes elegir una GPU por UUID o dirección PCI (`--device 0000:03:00.0 ...`).
+   También puedes elegir una GPU por UUID o dirección PCI (`--device 0000:03:00.0 ...`). Las compilaciones usan
+   tantos trabajos en paralelo como CPUs haya, hasta 8; `--jobs N` lo cambia.
 
 3. Instala la herramienta e inscribe el perfil. `--dry-run` muestra qué cambiaría.
 
@@ -174,6 +181,22 @@ Ejecuta esto desde un clon de este repositorio.
    sudo /usr/local/bin/nvbios system enable --kernel "$(uname -r)"
    sudo /usr/local/bin/nvbios system status
    ```
+
+   Ubuntu corrige algunos errores de compilación de NVIDIA con sus propios kernels en su paquete DKMS, no en el
+   código fuente: son las entradas `PATCH[n]` de `/usr/src/nvidia-VERSIÓN/dkms.conf` (por ejemplo, las correcciones
+   que necesitan sus kernels 7.0). Vienen en `nvidia-dkms-VERSIÓN-open`, que instala `nvidia-driver-VERSIÓN-open`;
+   `nvidia-headless-no-dkms-VERSIÓN-open` no trae `dkms.conf`, así que instala también `nvidia-dkms-VERSIÓN-open`.
+   `reconcile` aplica las que DKMS aplicaría para el kernel que compila, en el mismo orden y antes del parche del
+   override, y vuelve a compilar un kernel cuando una nueva revisión del paquete las cambia. Un `--driver-source` que
+   entregaste también las recibe, y un parche que ya está en él se detecta y se deja como está.
+
+   `dkms.conf` solo se lee, nunca se ejecuta: las entradas que no puede leer sin ejecutar código de shell se omiten y
+   aparecen en `skipped`, y `reconcile --dry-run` muestra lo que selecciona antes de compilar. Cada parche debe
+   aplicarse como lo aplica DKMS (exactamente, o con el fuzz por defecto de GNU patch) y no puede cambiar un archivo
+   que lee el parche del override, o la compilación se detiene y dice por qué. Sin ese `dkms.conf`, como con el driver
+   `.run`, nada cambia. `sudo nvbios system status` los muestra en `distribution_patches` (si la compilación falló,
+   también en `last_attempt`), y `/var/lib/nvidia-vbios/lifecycle/status-KERNEL.json` guarda el SHA-256 de cada
+   parche.
 
 5. Reinicia. Tu entrada normal sigue en el menú de arranque. Tras reiniciar, `sudo nvbios system status`
    compara el módulo y los parámetros cargados con los preparados.
@@ -199,7 +222,8 @@ amplía el límite del runtime o módulo que ya tenías instalado.
 ## Actualizaciones del kernel y del driver
 
 - **Kernel**: automático. El hook de paquetes y un temporizador de reintento recompilan los módulos y la
-  entrada de arranque para el kernel nuevo.
+  entrada de arranque para el kernel nuevo, con las correcciones de compilación del DKMS de la distribución para ese
+  kernel (ver el paso 4 de Instalación).
 - **Driver** (instalación `.run`): ejecuta `sudo nvbios system pre-install` antes de quitar el driver anterior,
   instala el nuevo y registra el código fuente sin parchear de la nueva versión:
 
@@ -213,9 +237,36 @@ amplía el límite del runtime o módulo que ya tenías instalado.
   prioridad en todas las entradas de arranque, incluida la normal, y el driver NVIDIA no arrancará. Si ya
   reiniciaste, ejecuta `post-install` desde ese arranque; funciona aunque `nvidia-smi` falle.
 - **Driver** (gestor de paquetes, experimental): no hay que ejecutar nada. El hook de paquetes descarga el código
-  fuente correspondiente y recompila durante la actualización (ver Estado). Revisa `sudo nvbios system status`
-  antes de reiniciar: si no pudo recompilar, queda como predeterminada una entrada normal con el módulo nuevo de la
-  distribución (o la anterior, si no hay ninguna) y `status` muestra el comando `post-install`.
+  fuente correspondiente, le agrega las correcciones de compilación del DKMS de la distribución como arriba y
+  recompila durante la actualización (ver Estado). Revisa `sudo nvbios system status` antes de reiniciar: si no pudo
+  recompilar, queda como predeterminada una entrada normal con el módulo nuevo de la distribución (o la anterior, si
+  no hay ninguna) y `status` muestra el comando `post-install`.
+
+## Agregar una GPU a una instalación existente
+
+`enroll` reemplaza el perfil completo, así que prepara uno nuevo con todas las GPUs: las que ya tienen override, con
+los mismos payloads, y la nueva. Los payloads inscritos se guardan en `/var/lib/nvidia-vbios/roms/`, y
+`/etc/nvidia-vbios/lifecycle.json` indica el archivo de cada GPU (por `bdf`) como `payload_path`. Primero vuelve a
+listar las GPUs (`sudo ./nvbios system devices`): los índices pueden cambiar al agregar una GPU, así que elige cada
+GPU por su dirección PCI (`--device 0000:03:00.0 ARCHIVO`). En Fedora y la familia RHEL la ventana lo hace todo:
+**Mantener el archivo actual** para las GPUs que ya cargaste, **Archivo nuevo** para la nueva y luego **Cargar**.
+
+En la línea de comandos, `enroll` necesita las recompilaciones automáticas desactivadas. Desactívalas con
+`pre-install` y no con `disable`: las detiene igual, pero deja como predeterminada la entrada del override actual, que
+es lo que necesita `reconcile`.
+
+1. `prepare` con todas las GPUs y un `--output` nuevo (paso 2 de Instalación). No cambia nada en el sistema.
+2. `sudo nvbios system pre-install` y luego `sudo nvbios system enroll --profile SALIDA-NUEVA/profile.json`. El
+   comando `post-install` que muestra `pre-install` es para actualizaciones del driver; aquí no hace falta.
+3. `sudo nvbios system reconcile --kernel "$(uname -r)"` y `sudo nvbios system enable --kernel "$(uname -r)"`. La
+   nueva entrada del override queda como predeterminada. Reinicia.
+
+Si ya ejecutaste `disable`, ahora la predeterminada es la entrada normal. `reconcile` la respeta como una elección
+tuya y se detiene con `foreign or unrelated ... default preserved`. En Fedora, agrega `--select-default` a ese
+`reconcile`. En otros sistemas, primero vuelve a dejar como predeterminada la entrada anterior del override:
+`sudo nvbios system status` muestra su id dentro de `last_attempt`, como `entry`, o como `previous_ready` si después
+hubo un `reconcile` rechazado. Defínela con `sudo grub-set-default vbios-...` (`bootctl set-default` con
+systemd-boot) y luego sigue con el paso 3.
 
 ## Si algo sale mal
 

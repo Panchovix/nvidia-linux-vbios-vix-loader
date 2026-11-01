@@ -1083,6 +1083,15 @@ class Bootstrap:
                 'module_parameters': observations, 'activation_matches': activation_matches,
                 'applied': 'unknown', 'electrical': 'unknown', 'diagnostics': diagnostics}
 
+    def _distribution_patches(self, kernel):
+        """The distribution DKMS build fixes in the prepared build for `kernel`, by name; None without any."""
+        from .lifecycle.distribution_patches import summary
+        try:
+            prepared = self._read(STATE + f'/status-{token(kernel)}.json')
+        except (LifecycleError, OSError):
+            return None
+        return summary(prepared.get('distribution_patches')) if isinstance(prepared, dict) else None
+
     def status(self, *, require_installed=False):
         installed = self._read(BASE + '/installed.json')
         valid = bool(installed)
@@ -1115,6 +1124,7 @@ class Bootstrap:
                 'last_attempt': self._read(STATE + f'/attempt-{token(running_kernel)}.json'),
                 'driver_drift': self._read(STATE + '/fleet.json').get('drift'),
                 'source_fetch': self._read(STATE + '/source-fetch.json'),
+                'distribution_patches': self._distribution_patches(running_kernel),
                 'runtime': self._runtime_status(running_kernel),
                 'triggers_enabled': self.path(ENABLED).exists() and self.ops.triggers_enabled(),
                 'release': installed.get('release'), 'migration': self._read(BASE + '/migration.json'),

@@ -21,7 +21,7 @@ COMMANDS = {
     "ukify": "/usr/lib/systemd/ukify", "objcopy": "/usr/bin/objcopy",
     "sbverify": "/usr/bin/sbverify", "efi-readvar": "/usr/bin/efi-readvar", "openssl": "/usr/bin/openssl",
     "dpkg-query": "/usr/bin/dpkg-query", "pacman": "/usr/bin/pacman", "dkms": "/usr/sbin/dkms",
-    "rpm": "/usr/bin/rpm", "modinfo": "/usr/sbin/modinfo", "make": "/usr/bin/make",
+    "rpm": "/usr/bin/rpm", "modinfo": "/usr/sbin/modinfo", "make": "/usr/bin/make", "patch": "/usr/bin/patch",
     "depmod": "/usr/sbin/depmod", "dracut": "/usr/bin/dracut", "lsinitrd": "/usr/bin/lsinitrd",
     "mokutil": "/usr/bin/mokutil", "nvidia-smi": "/usr/bin/nvidia-smi",
     "systemctl": "/usr/bin/systemctl", "grub2-editenv": "/usr/bin/grub2-editenv", "restorecon": "/usr/sbin/restorecon",
@@ -343,9 +343,15 @@ class SystemOperations:
         from nvidia_vbios.driver import inspect_source
         return inspect_source(path)
 
-    def prepare_source(self, source, destination):
+    def prepare_source(self, source, destination, before_patch=None):
         from nvidia_vbios.driver import prepare_source
-        return prepare_source(source, destination)
+        return prepare_source(source, destination, before_patch=before_patch)
+
+    def patch(self, arguments, *, log):
+        """GNU patch with the arguments lifecycle.distribution_patches gives; returns its exit status."""
+        if not Path(self.command_path("patch")).exists():
+            raise LifecycleError("the distribution's DKMS build fixes need GNU patch: install the patch package")
+        return self._run(["patch", *arguments], log=log, allow_failure=True).returncode
 
     def inventory(self):
         # NVML/nvidia-smi may fail after a userspace RPM update while the old

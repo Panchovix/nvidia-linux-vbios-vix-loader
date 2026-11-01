@@ -487,8 +487,13 @@ def _source_files(source: Path):
             yield path
 
 
-def prepare_source(source, destination) -> dict:
-    """Create a new isolated source copy with provenance and apply the patch."""
+def prepare_source(source, destination, *, before_patch=None) -> dict:
+    """Create a new isolated source copy with provenance and apply the patch.
+
+    `before_patch(copy)`, when given, changes the new copy first (the lifecycle
+    applies a distribution's DKMS build fixes there); every file this patch
+    reads must come out of it unchanged.
+    """
     source = Path(source).expanduser().resolve()
     destination = Path(destination).expanduser().absolute()
     if destination.is_symlink() or destination.exists():
@@ -520,6 +525,14 @@ def prepare_source(source, destination) -> dict:
         marker = {'schema_version': SCHEMA_VERSION, 'source': str(source),
                   'prepared_source': str(destination), 'source_hashes': hashes}
         _atomic_write(destination / WORKING_COPY_MARKER, (json.dumps(marker, indent=2, sort_keys=True) + '\n').encode())
+        if before_patch is not None:
+            before_patch(destination)
+            for name, expected in info['source_hashes'].items():
+                target = destination / name
+                if target.is_symlink() or not target.is_file() or _hash(target.read_bytes()) != expected:
+                    raise DriverPatchError(f'{name} changed before the VBIOS override patch, which needs the original file')
+            if (destination / PARSER).exists() or (destination / PARSER).is_symlink():
+                raise DriverPatchError(f'{PARSER} exists before the VBIOS override patch')
         return apply_to_tree(destination)
     except BaseException:
         if created:

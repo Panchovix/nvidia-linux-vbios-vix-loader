@@ -70,6 +70,11 @@ def _not_initialized(records):
             f'{those} or without an override.')
 
 
+def default_jobs():
+    """Parallel build jobs when prepare is not given --jobs: the CPU count, at most 8 (as system setup)."""
+    return min(max(os.cpu_count() or 1, 1), 8)
+
+
 def payload_for(archive, name, gpu, representation=None):
     """(payload, family, BIOS versions) that prepare enrolls from `archive` for `gpu`; BootstrapError when refused.
 
@@ -236,7 +241,7 @@ class Onboarding:
         return name, artifacts
 
     def prepare(self, *, devices, driver_source, output, p2p_preferred=False, no_auto_source=False,
-                userspace=None, fallback_entry=None, jobs=1, representations=(),
+                userspace=None, fallback_entry=None, jobs=None, representations=(),
                 nvidia_smi='/usr/bin/nvidia-smi', libraries=None, boot_backend=None, initramfs=None,
                 boot_root=None, esp=None, xbootldr=None, grub_config=None, signing_key=None, signing_certificate=None,
                 uki_key=None, uki_certificate=None):
@@ -268,6 +273,8 @@ class Onboarding:
             raise BootstrapError('module signing requires both key and certificate')
         if not 1 <= len(devices) <= MAX_GPUS:
             raise BootstrapError(f'select one through {MAX_GPUS} GPUs with --device SELECTOR ROM')
+        if jobs is None:
+            jobs = default_jobs()
         if type(jobs) is not int or not 1 <= jobs <= 256:
             raise BootstrapError('jobs must be between 1 and 256')
         destination = _input_path(output)
@@ -405,7 +412,7 @@ def main(argv=None, *, root=Path('/'), operations=None):
     prepare.add_argument('--initramfs', choices=('dracut','initramfs-tools','mkinitcpio'))
     for flag in ('boot-root','esp','xbootldr','grub-config','signing-key','signing-certificate','uki-key','uki-certificate'):
         prepare.add_argument('--'+flag, type=Path)
-    prepare.add_argument('--jobs', type=int, default=1)
+    prepare.add_argument('--jobs', type=int, help='parallel build jobs (default: the CPU count, at most 8)')
     if optional_editor() is not None:
         prepare.add_argument('--representation', action='append', nargs=2, metavar=('SELECTOR', 'NAME'), default=[])
     args = parser.parse_args(argv)

@@ -1,6 +1,9 @@
 """Open-loader profile preparation from single-chain payloads; synthetic files, no GPU or editor."""
+import contextlib
+import io
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -10,7 +13,7 @@ from nvidia_vbios import payload
 from nvidia_vbios.bootstrap import BootstrapError, BootstrapOperations
 from nvidia_vbios.lifecycle.security import digest
 from nvidia_vbios.lifecycle.system import SystemOperations
-from nvidia_vbios.onboarding import Onboarding, payload_for
+from nvidia_vbios.onboarding import Onboarding, main as onboarding_main, payload_for
 
 from test_payload import legacy_image
 
@@ -89,6 +92,29 @@ class OpenOnboardingTests(unittest.TestCase):
         self.assertEqual((device['sha256'], device['source_sha256']), (digest(data), digest(data)))
         self.assertEqual(Path(device['payload']).read_bytes(), data)
         self.assertNotIn('require_p2p_source', profile)
+
+    def test_jobs_default_to_the_cpu_count_up_to_eight_and_an_explicit_value_wins(self):
+        def jobs():
+            value = json.loads((self.output / 'profile.json').read_text())['jobs']
+            shutil.rmtree(self.output)
+            return value
+        for count, expected in ((None, 1), (4, 4), (32, 8)):
+            with self.subTest(count=count), mock.patch('nvidia_vbios.onboarding.os.cpu_count', return_value=count):
+                self.prepare(legacy_image(PRO_6000))
+                self.assertEqual(jobs(), expected)
+        self.prepare(legacy_image(PRO_6000), jobs=2)
+        self.assertEqual(jobs(), 2)
+        for value in (0, 257, '4'):
+            with self.subTest(value=value), self.assertRaisesRegex(BootstrapError, 'between 1 and 256'):
+                self.prepare(legacy_image(PRO_6000), jobs=value)
+        # The command line leaves --jobs out the same way.
+        (self.root / 'gpu0.bin').write_bytes(legacy_image(PRO_6000))
+        argv = ['prepare', '--device', '0', str(self.root / 'gpu0.bin'), '--driver-source', str(self.source),
+                '--userspace', 'manual', '--output', str(self.output)]
+        with mock.patch('nvidia_vbios.onboarding.os.cpu_count', return_value=12), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(onboarding_main(argv, root=self.root, operations=Operations(PRO_6000)), 0)
+        self.assertEqual(jobs(), 8)
 
     def test_p2p_source_stays_required_after_updates(self):
         self.prepare(legacy_image(PRO_6000), p2p_preferred=True)

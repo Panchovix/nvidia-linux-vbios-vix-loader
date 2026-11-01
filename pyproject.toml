@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nvidia-linux-vbios-vix-loader"
-version = "0.1.0"
+version = "0.1.1"
 description = "Load a modified VBIOS per NVIDIA GPU at boot on Linux, in memory, through the open kernel modules"
 readme = "README.md"
 license = "GPL-3.0-or-later AND MIT"

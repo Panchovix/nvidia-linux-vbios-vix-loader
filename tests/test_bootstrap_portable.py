@@ -1,4 +1,5 @@
 """Fresh portable bootstrap flows use synthetic roots and injected operations."""
+import copy
 from pathlib import Path
 import json
 import sys
@@ -13,6 +14,7 @@ import test_bootstrap as bootstrap_fixtures
 from test_bootstrap import Operations, OLD
 from test_lifecycle_portable import PortableFakeOperations
 from nvidia_vbios.bootstrap import Bootstrap, BootstrapError, CONFIG, BASE, ACTION_TARGETS
+from nvidia_vbios.driver_update import DriverUpdate
 from nvidia_vbios.lifecycle import Reconciler
 from nvidia_vbios.lifecycle.platform import DEBIAN_PLATFORM, ARCH_PLATFORM
 from nvidia_vbios.lifecycle.security import LifecycleError, atomic_write
@@ -183,6 +185,51 @@ class PortableBootstrapTests(unittest.TestCase):
             self.worker.enable(OLD)
         self.assertFalse(self.ops.enabled)
         self.assertFalse((self.root / ACTION_TARGETS['pacman'].lstrip('/')).exists())
+
+
+class AddGpuTests(unittest.TestCase):
+    """The README's order for adding a GPU to a loaded setup: pre-install, enroll, reconcile, enable."""
+    def portable(self, platform, backend):
+        case = PortableBootstrapTests('test_fresh_debian_apt_install_enroll_reconcile_enable_disable_resume')
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.setup_platform(platform, backend)
+        return case.worker, case.ops, case.root, case.fixture, case.profile
+
+    def fedora(self):
+        fixture = bootstrap_fixtures.BootstrapTests('runTest')
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        return fixture.worker, fixture.ops, fixture.root, fixture, fixture.profile
+
+    def test_pre_install_keeps_the_override_default_while_a_gpu_is_added(self):
+        for label, make in (('Debian GRUB', lambda: self.portable(DEBIAN_PLATFORM, 'grub')),
+                            ('Arch systemd-boot', lambda: self.portable(ARCH_PLATFORM, 'systemd-boot')),
+                            ('Fedora BLS', self.fedora)):
+            with self.subTest(label):
+                worker, ops, root, fixture, profile = make()
+                configuration = lambda: json.loads((root / CONFIG.lstrip('/')).read_bytes())
+                worker.install(fixture.repository)
+                worker.enroll(profile)
+                ops.config = configuration()
+                ready = Reconciler(root, ops).reconcile(OLD)
+                worker.enable(OLD)
+                self.assertEqual(ops.environment['saved_entry'], ready['entry'])
+                # Rebuilds off, as enroll needs, with the current override entry still the default.
+                self.assertEqual(DriverUpdate(root, ops).pre_install()['state'], 'suspended')
+                self.assertEqual((ops.enabled, ops.environment['saved_entry']), (False, ready['entry']))
+                bigger = copy.deepcopy(profile)
+                bigger['devices'].append(fixture.device(1))
+                ops.config = bigger
+                worker.enroll(bigger)
+                ops.config = configuration()
+                self.assertEqual(len(ops.config['devices']), 2)
+                rebuilt = Reconciler(root, ops).reconcile(OLD)
+                self.assertEqual(rebuilt['state'], 'ready')
+                self.assertNotEqual(rebuilt['entry'], ready['entry'])
+                enabled = worker.enable(OLD)
+                self.assertTrue(enabled['triggers_enabled'])
+                self.assertEqual(ops.environment['saved_entry'], rebuilt['entry'])
 
 
 if __name__ == '__main__':

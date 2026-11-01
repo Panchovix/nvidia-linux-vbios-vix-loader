@@ -9,6 +9,7 @@ import shutil
 import tempfile
 import time
 from ..limits import REGISTRY_STRING_MAX_BYTES
+from . import distribution_patches
 from .config import load_config, resume_command, select_source
 from .security import (LifecycleError, LockBusy, atomic_write, checked_path, digest, hash_file, json_write, locked,
                        token, exchange_directory)
@@ -200,7 +201,8 @@ class Reconciler:
 
     Operations implement installed_version, inspect_source, prepare_source,
     prerequisites, inventory, build, modinfo, sign, depmod, selected_module,
-    initramfs, extract, grub_environment and set_default. None uses a shell.
+    initramfs, extract, grub_environment and set_default, and patch when the
+    distribution's dkms.conf selects build fixes. None uses a shell.
     """
     def __new__(cls, root=Path("/"), operations=None, config_path=CONFIG):
         # Existing schema-1 Fedora profiles retain the original implementation.
@@ -1041,7 +1043,11 @@ class Reconciler:
 
     def reconcile(self, kernel, *, dry_run=False, select_default=False):
         if dry_run:
-            return self.dry_run(kernel)
+            result = self.dry_run(kernel)
+            planned = distribution_patches.plan(self.root, result["version"], token(kernel))
+            if planned is not None:
+                result["distribution_patches"] = distribution_patches.preview(planned)
+            return result
         kernel = token(kernel)
         select = kernel if select_default else None
         self.trusted(self.state, missing=True)
@@ -1050,6 +1056,7 @@ class Reconciler:
         journal = None
         rollback_error = None
         prepared = None
+        distribution = None
         existing = {}
         attempt_path = self.state / f"attempt-{kernel}.json"
         owns_lock = False
@@ -1123,11 +1130,15 @@ class Reconciler:
                 json_write(attempt_path, running)
                 if existing.get("state") != "ready":
                     json_write(status_path, running)
+                # The distribution's DKMS build fixes for this kernel (None without a dkms.conf). A new
+                # selection, for example from a new package revision, rebuilds a READY kernel as DKMS would.
+                planned = distribution_patches.plan(self.root, plan["version"], kernel)
                 if (existing.get("state") == "ready" and existing.get("configuration_sha256") == plan["configuration_sha256"]
                         and existing.get("driver") == plan["version"]
                         and existing.get("generation_sha256") == plan["generation_sha256"]
                         and existing.get("activation_config_sha256") == plan["activation_config_sha256"]
                         and existing.get("base_sha256") == plan["base_sha256"]
+                        and not distribution_patches.changed_selection(existing, planned)
                         and existing.get("deployment") and all(
                             self.path(record["path"]).is_file() and not self.path(record["path"]).is_symlink()
                             and self.trusted(self.path(record["path"]))
@@ -1152,7 +1163,17 @@ class Reconciler:
                 workspace.mkdir(mode=0o700, parents=True)
                 prepared = workspace / "source"
                 source = self.path(plan["source"]["path"])
-                manifest = self.ops.prepare_source(source, prepared)
+                # The distribution's DKMS build fixes go into the copy before the override patch. The record
+                # fills in as they run, so that a failed attempt still shows them.
+                distribution = json.loads(json.dumps(planned["record"])) if planned else None
+                if planned and planned["patches"]:
+                    def before_patch(tree):
+                        distribution_patches.apply(
+                            planned, tree, self.ops, guarded=list(plan["source_inspection"]["source_hashes"]),
+                            log=workspace / "build.log", work=workspace / "distribution-patches", record=distribution)
+                    manifest = self.ops.prepare_source(source, prepared, before_patch=before_patch)
+                else:
+                    manifest = self.ops.prepare_source(source, prepared)
                 if (manifest.get("version") != plan["version"]
                         or manifest.get("module_metadata", {}).get("vbios_override_per_gpu") != "1"
                         or manifest.get("module_metadata", {}).get("vbios_override_param_bytes") != str(REGISTRY_STRING_MAX_BYTES)
@@ -1161,6 +1182,8 @@ class Reconciler:
                         or any(manifest.get("source_hashes", {}).get(name) != expected
                                for name, expected in plan["source_inspection"]["source_hashes"].items())):
                     raise LifecycleError("driver adapter did not produce the validated isolated source/hash/module manifest")
+                if distribution is not None:
+                    manifest = dict(manifest, distribution_patches=distribution)
                 json_write(workspace / "source-manifest.json", manifest)
                 self.ops.build(prepared, kernel, config.raw.get("jobs", 1), workspace / "build.log")
                 built = prepared / "kernel-open"
@@ -1239,7 +1262,7 @@ class Reconciler:
                           "activation_config_sha256": plan["activation_config_sha256"], "force_driver_sha256": boot_publication.get("force_driver_sha256", digest(FORCE_BYTES)),
                           "activation_generation": ACTIVATION_GENERATION, "module_parameters": plan["module_parameters"],
                           "generation_sha256": plan["generation_sha256"], "configuration_sha256": plan["configuration_sha256"], "base_sha256": plan["base_sha256"],
-                          "deployment": deployment}
+                          "deployment": deployment, "distribution_patches": distribution}
                 # Keep manifests and logs; discard the large expendable working copy.
                 if config.raw.get("retain_build_tree") is not True:
                     try:
@@ -1299,6 +1322,8 @@ class Reconciler:
                           "error": str(exc), "rollback_error": rollback_error, "finished": time.time()}
                 if fail_safe_error:
                     status["fail_safe_error"] = fail_safe_error
+                if distribution is not None:
+                    status["distribution_patches"] = distribution
                 preserved = journal is None and self._ready_artifacts_intact(existing, kernel)
                 json_write(attempt_path, dict(status, preserved_ready=preserved,
                                              previous_ready=existing.get("entry") if preserved else None))
