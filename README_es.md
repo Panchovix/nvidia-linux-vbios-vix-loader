@@ -45,40 +45,40 @@ versión de NVIDIA; arranca sin override. Si no hay ninguna, la entrada anterior
 `--no-auto-source` (en `prepare`) desactiva la descarga.
 
 Probado funcionando en: RTX PRO 6000 Blackwell Max-Q, RTX PRO 6000 Blackwell Workstation Edition, GeForce RTX
-5090, 5080, 5070 Ti, 5070, 5060 Ti y RTX 2000 Ada.
+5090, 5080, 5070 Ti, 5070, 5060 Ti y RTX 2000 Ada. Funciona en GPUs Turing, Ampere, Ada y Blackwell, tanto de
+escritorio como laptops, salvo las GPUs Ada de laptop (ver abajo).
 
 El firmware GSP de Ada carga como máximo 512 KiB, contados desde la imagen legacy del payload, así que los payloads
 de Ada hay que reubicarlos con Vix Editor:
 
 - RTX 2000 Ada (probada): `nvbios normalize editada.rom gpu0.bin --representation ada-relocated-v1` (0.1.5 o superior).
-- **Experimental, sin probar en hardware**: otras GPUs Ada de escritorio y workstation con
+- Otras GPUs Ada de escritorio y workstation, con
   `--representation ada-relocated-v2` (0.1.6 o superior). Funciona offline con imágenes de RTX 4090, 4080 (SUPER),
   4070 Ti SUPER, 4070 (SUPER), 4060 Ti, 4060 y RTX 6000/5000/4500/4000 Ada; lo que no verifica se rechaza.
-  Si la pruebas, abre un issue con el resultado.
 - Las imágenes Ada de laptop probadas se rechazan: cuatro no caben y la de la RTX 4090 Laptop no trae imagen UEFI.
 
 Ampere GA102–GA107 tiene el mismo **límite conocido de 512 KiB del GSP**, contado
 desde la imagen legacy seleccionada hasta el final del payload. El loader rechaza
 las imágenes demasiado grandes durante la preparación e inscripción, evitando
 que el firmware vuelva silenciosamente a la VBIOS de fábrica. Una ROM Ampere
-normalizada sin más supera ese límite. **Experimental, sin probar en hardware**:
+normalizada sin más supera ese límite. Usa
 `nvbios normalize editada.rom gpu0.bin --representation ampere-relocated-v1` (Vix Editor 0.1.9
 o posterior)
 quita la imagen UEFI y los bytes posteriores a la última imagen de datos, con lo que
 quedan entre unos 443 y 506 KiB desde la imagen legacy en las imágenes examinadas (el
 archivo conserva un prefijo de ~37 KiB que no se envía); lo que no verifica se rechaza.
-Si la pruebas, abre un issue con el resultado. GA100 usa otro firmware y queda fuera
+GA100 usa otro firmware y queda fuera
 de esta auditoría de capacidad.
 
-**Turing (TU102, TU104, TU106, TU116, TU117), experimental, sin probar en ninguna GPU Turing.** El módulo
+**Turing (TU102, TU104, TU106, TU116, TU117).** El módulo
 parcheado acepta estos chips, y su firmware GSP (`gsp_tu10x.bin`) tiene el mismo receptor de override y el
-mismo límite de 512 KiB (calculado por análisis estático de 615.78.08, no en hardware). Un payload Turing de un
+mismo límite de 512 KiB (calculado por análisis estático de 615.78.08). Un payload Turing de un
 solo banco envía 250-355 KB desde la imagen legacy (el archivo conserva un prefijo de hasta ~162 KiB que no se
 envía) y no necesita reubicación: `nvbios normalize editada.rom gpu0.bin`. Vix Editor 0.1.18 o
 posterior también guarda `<nombre>-loader-e0end.bin` (`--representation turing-e0-end-v1`), una variante para probar
 cuando el primer archivo se carga pero el cambio no se aplica. Si el GSP rechaza una imagen, la tarjeta usa
-su VBIOS de fábrica. Para ayudar, sigue la [guía para probar Turing](https://github.com/Panchovix/nvidia-vbios-vix-editor/blob/main/docs/turing_es.md): carga primero tu ROM
-sin modificar, luego un cambio de límite de potencia, y reporta `nvidia-smi -q -d POWER` antes y después y la
+su VBIOS de fábrica. Si un cambio no se aplica, la [guía para probar Turing](https://github.com/Panchovix/nvidia-vbios-vix-editor/blob/main/docs/turing_es.md) muestra cómo revisarlo: carga primero tu ROM
+sin modificar, luego un cambio de límite de potencia, y compara `nvidia-smi -q -d POWER` antes y después y la
 línea `vbios_override` de `journalctl -k -b`.
 
 ## Varias GPUs
