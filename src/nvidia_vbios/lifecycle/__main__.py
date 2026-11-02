@@ -94,7 +94,7 @@ def main(argv=None):
     reconcile = sub.add_parser("reconcile")
     reconcile.add_argument("--kernel")
     reconcile.add_argument("--dry-run", action="store_true")
-    # Explicit only (`nvbios system setup`); hooks and the service never pass it.
+    # Explicit only (`nvbios system setup`, or by hand after `disable`); hooks and the service never pass it.
     reconcile.add_argument("--select-default", action="store_true",
                            help="keep the normal entry of --kernel as the previous default and select the new build")
     args = parser.parse_args(argv)

@@ -58,6 +58,25 @@ class PortableHookTests(unittest.TestCase):
         self.assertIn(KERNEL_INSTALL_TARGET, catalog)
         self.assertNotIn(DNF_TARGETS['dnf4'], catalog)
 
+    def test_debian_kernel_hook_never_fails_the_kernel_package(self):
+        catalog = hook_templates_for(DEBIAN_PLATFORM)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'lifecycle.json').write_text('{}')
+            runtime = root / 'runtime'
+            runtime.write_text('#!/bin/sh\nexit 3\n')
+            runtime.chmod(0o755)
+            for leaf in ('postinst', 'postrm'):
+                script = catalog[f'/etc/kernel/{leaf}.d/zz-nvidia-vbios']['data'].decode()
+                script = script.replace('/etc/nvidia-vbios/lifecycle.json', str(root / 'lifecycle.json'))
+                script = script.replace('/usr/libexec/nvidia-vbios', str(runtime))
+                hook = root / leaf
+                hook.write_text(script)
+                hook.chmod(0o755)
+                result = subprocess.run([str(hook), '6.17.0-5-generic'], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0)
+                self.assertIn('nvidia-vbios: could not queue', result.stderr)
+
     def test_pacman_has_package_triggers_and_one_fixed_deferred_action(self):
         text = hook_templates_for(ARCH_PLATFORM)[PACMAN_TARGET]['data'].decode()
         self.assertEqual(text.count('[Trigger]'), 1)

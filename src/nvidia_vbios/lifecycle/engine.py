@@ -740,6 +740,10 @@ class Reconciler:
         selected = environment.get("saved_entry")
         if selected == journal.get("entry"):
             self.ops.set_default(journal["previous_default"])
+            # A boot-loader command can exit without persisting: then keep the new, complete entry and its
+            # files rather than delete them under a default that still names it. The next reconcile retries.
+            if self.ops.grub_environment().get("saved_entry") != journal["previous_default"]:
+                raise LifecycleError("the previous boot default did not persist; the new entry stays the default")
         elif selected != journal["previous_default"]:
             raise LifecycleError("GRUB default changed externally during rollback")
         module_paths = set()

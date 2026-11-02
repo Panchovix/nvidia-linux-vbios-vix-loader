@@ -252,11 +252,20 @@ On the command line, `enroll` needs the automatic rebuilds off. Turn them off wi
 3. `sudo nvbios system reconcile --kernel "$(uname -r)"` and `sudo nvbios system enable --kernel "$(uname -r)"`.
    The new override entry becomes the default. Reboot.
 
-If you already ran `disable`, the normal entry is the default now. `reconcile` keeps it as your own choice and stops
-with `foreign or unrelated ... default preserved`. On Fedora, add `--select-default` to that `reconcile`. Elsewhere,
-make the previous override entry the default again first: `sudo nvbios system status` shows its id under
-`last_attempt`, as `entry`, or as `previous_ready` if a `reconcile` was refused since. Set it with
-`sudo grub-set-default vbios-...` (`bootctl set-default` with systemd-boot), then run step 3.
+If you already ran `disable`, the automatic rebuilds are off and the normal entry is the default. In step 2 skip
+`pre-install` (it stops with `select the existing READY default ...`) and run only `enroll`. In step 3 add
+`--select-default` to `reconcile`, with any boot setup:
+`sudo nvbios system reconcile --kernel "$(uname -r)" --select-default`, then
+`sudo nvbios system enable --kernel "$(uname -r)"`. Without it, `reconcile` keeps the normal entry as your own choice
+and stops with `... default preserved`. The new override entry becomes the default. Reboot.
+
+`--select-default` only replaces the normal entry that `disable` restored, also when an update rebuilt its initramfs
+since. With another default, or a one-time boot still pending (reboot once first), it stops and changes nothing. After
+a kernel update that entry may start the new kernel (the first GRUB entry on Ubuntu and Debian, or an Arch entry or
+UKI that the kernel package rewrites): then reboot first, so that `uname -r` is that kernel; the error names the
+kernel to use. An installed runtime older than this version refuses the flag (`only reviewed for Fedora BLS entries`
+outside Fedora) or does not know it (`unrecognized arguments`): update it first from this checkout with
+`sudo nvbios system install --repository "$PWD"`.
 
 ## If something goes wrong
 

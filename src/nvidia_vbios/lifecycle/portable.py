@@ -197,9 +197,39 @@ class PortableReconciler(Reconciler):
         except (LifecycleError, OSError, ValueError):
             return 'unknown'
 
+    def _selected_normal(self, config, normal, saved, select):
+        """Accept `saved` for `reconcile --kernel K --select-default` (K is `select`) when it is the normal entry this
+        loader recorded, the one disable restores (fleet normal_fallback, or normal_boot before any build), and now
+        the backend's conventional normal entry of K: the GRUB menu entry ID, the systemd-boot entry or the UKI file
+        name. Its recorded kernel and hashes are not required: an update may have rebuilt its initramfs, or moved a
+        rolling entry to a newer kernel. plan() still refuses a foreign VBIOS activation in it, base_sha256 pins it
+        during the build, and the commit records it as the new normal fallback. Raises, with the reason, otherwise."""
+        recorded = normal.get('entry') if isinstance(normal, dict) else None
+        if not saved or saved != recorded:
+            raise LifecycleError('foreign or unrelated boot default preserved; --select-default replaces only '
+                                 f'{recorded}, the normal entry disable restored')
+        entry, problem = None, None
+        try:
+            entry = self.boot.discover(select)
+        except LifecycleError as exc:
+            problem = exc
+        if entry is None or entry.entry_id != saved:
+            now = self._saved_normal_kernel(config, saved)
+            if now and now != select:
+                raise LifecycleError(f'{saved}, the normal entry disable restored, starts {now}, not {select}: use '
+                                     f'--kernel {now}, after a reboot if another kernel is running; boot default preserved')
+            if entry is None:
+                raise LifecycleError(f'cannot confirm {saved} as the normal entry of {select}: {problem}; '
+                                     'boot default preserved') from problem
+            raise LifecycleError(f'{saved}, the normal entry disable restored, is not the normal entry of {select} '
+                                 f'({entry.entry_id} is); boot default preserved')
+        try:
+            self.boot.check_selector(saved)
+        except LifecycleError as exc:
+            raise LifecycleError(f'{exc}; boot default preserved') from exc
+        return entry
+
     def _guard_default(self, config, fleet, select=None):
-        if select:
-            raise LifecycleError('explicit default selection (--select-default) is only reviewed for Fedora BLS entries')
         if fleet.get('drift'):
             return self._guard_drift(config, fleet)
         normal = self._fallback(config, fleet)
@@ -208,10 +238,21 @@ class PortableReconciler(Reconciler):
         environment = self.ops.grub_environment()
         self._check_option_variables(config, environment)
         if environment.get('next_entry') or environment.get('prev_saved_entry'):
-            raise LifecycleError('another boot transition is pending')
+            raise LifecycleError('another boot transition is pending (a one-time boot entry); reboot once first')
         saved = environment.get('saved_entry')
         if saved == target:
             return target
+        if select:
+            # Only `reconcile --kernel K --select-default`, an explicit action (hooks and the timer never pass it).
+            # As on Fedora, the normal entry of K stays the previous default and the commit selects the build; the
+            # default never moves before the build, and anything else stops here.
+            self._selected_normal(config, normal, saved, select)
+            return saved
+        if last and saved == normal['entry']:
+            # The normal entry disable restores, also when a kernel update made it start a newer kernel (a rolling
+            # entry): a choice to keep, like a same-kernel normal default, and not an update candidate.
+            raise LifecycleError(f'normal boot default preserved: {saved} is the recorded normal entry; '
+                                 '`reconcile --kernel KERNEL --select-default` replaces it with the new build')
         eligible = not last and saved == config.fallback_entry
         if last:
             from .__main__ import kernel_key
@@ -230,11 +271,15 @@ class PortableReconciler(Reconciler):
         environment = self.ops.grub_environment(); current = environment.get('saved_entry')
         if environment.get('next_entry') or environment.get('prev_saved_entry'):
             return {'state':'preserved','reason':'pending boot transition','entry':current}
-        if current not in (normal['entry'], fleet.get('last_ready',{}).get('entry')):
+        if current == normal['entry']:
+            # Nothing to select, as on Fedora: an update may since have rebuilt its initramfs or moved a rolling
+            # entry to a newer kernel, which only matters to a selection.
+            return {'state':'normal','entry':current}
+        if current != fleet.get('last_ready',{}).get('entry'):
             return {'state':'preserved','reason':'foreign boot default','entry':current}
         self._validate_normal(config, normal)
-        if current != normal['entry']:
-            self.ops.set_default(normal['entry'])
+        self.boot.check_selector(normal['entry'])  # GRUB boots the first entry with that ID or title
+        self.ops.set_default(normal['entry'])
         if self.ops.grub_environment().get('saved_entry') != normal['entry']:
             raise LifecycleError('normal recovery selection did not persist')
         return {'state':'normal','entry':normal['entry']}

@@ -140,9 +140,11 @@ ReadWritePaths={' '.join(dict.fromkeys(paths))}
 def _debian_kernel_hook(action):
     return f'''#!/bin/sh
 # Queue only; the enclosing package manager may still hold its native lock.
-set -eu
+# Never fail the kernel package: run-parts --exit-on-error would leave it half-configured.
+set -u
 [ -f /etc/nvidia-vbios/lifecycle.json ] || exit 0
-exec {RUNTIME} lifecycle queue {action} "${{1-}}"
+{RUNTIME} lifecycle queue {action} "${{1-}}" || echo "nvidia-vbios: could not queue the kernel {action}; see nvbios system status" >&2
+exit 0
 '''.encode()
 
 

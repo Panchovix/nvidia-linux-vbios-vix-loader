@@ -261,12 +261,22 @@ es lo que necesita `reconcile`.
 3. `sudo nvbios system reconcile --kernel "$(uname -r)"` y `sudo nvbios system enable --kernel "$(uname -r)"`. La
    nueva entrada del override queda como predeterminada. Reinicia.
 
-Si ya ejecutaste `disable`, ahora la predeterminada es la entrada normal. `reconcile` la respeta como una elección
-tuya y se detiene con `foreign or unrelated ... default preserved`. En Fedora, agrega `--select-default` a ese
-`reconcile`. En otros sistemas, primero vuelve a dejar como predeterminada la entrada anterior del override:
-`sudo nvbios system status` muestra su id dentro de `last_attempt`, como `entry`, o como `previous_ready` si después
-hubo un `reconcile` rechazado. Defínela con `sudo grub-set-default vbios-...` (`bootctl set-default` con
-systemd-boot) y luego sigue con el paso 3.
+Si ya ejecutaste `disable`, las recompilaciones automáticas están desactivadas y la predeterminada es la entrada
+normal. En el paso 2 omite `pre-install` (se detiene con `select the existing READY default ...`) y ejecuta solo
+`enroll`. En el paso 3 agrega `--select-default` a `reconcile`, con cualquier configuración de arranque:
+`sudo nvbios system reconcile --kernel "$(uname -r)" --select-default` y luego
+`sudo nvbios system enable --kernel "$(uname -r)"`. Sin esa opción, `reconcile` respeta la entrada normal como una
+elección tuya y se detiene con `... default preserved`. La nueva entrada del override queda como predeterminada.
+Reinicia.
+
+`--select-default` solo reemplaza la entrada normal que `disable` restauró, aunque después una actualización haya
+regenerado su initramfs. Con otra predeterminada, o con un arranque único todavía pendiente (primero reinicia una
+vez), se detiene sin cambiar nada. Después de una actualización del kernel, esa entrada puede iniciar el kernel nuevo
+(la primera entrada de GRUB en Ubuntu y Debian, o una entrada o UKI de Arch que el paquete del kernel reescribe): en
+ese caso primero reinicia, para que `uname -r` sea ese kernel; el error indica qué kernel usar. Un runtime instalado
+anterior a esta versión rechaza la opción (`only reviewed for Fedora BLS entries` fuera de Fedora) o no la conoce
+(`unrecognized arguments`): primero actualízalo desde este checkout con
+`sudo nvbios system install --repository "$PWD"`.
 
 ## Si algo sale mal
 

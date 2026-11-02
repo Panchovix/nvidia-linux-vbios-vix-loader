@@ -820,6 +820,8 @@ class Bootstrap:
                     if digest(self._trusted_bytes(record['path'])) != record['sha256']:
                         raise BootstrapError('normal recovery changed; default rollback needs review')
                 operations.set_default(plan['entry'])
+                if operations.grub_environment().get('saved_entry') != plan['entry']:
+                    raise BootstrapError('the normal boot default did not persist; the READY entry stays the default')
             raise
         return dict(public, state='selected', entry=plan['target'], previous_entry=plan['entry'])
 

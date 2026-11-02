@@ -130,6 +130,15 @@ class _GrubStanza:
     data: bytes
 
 
+@dataclass(frozen=True)
+class _GrubItem:
+    """A menuentry or submenu header; parent is the index of the enclosing submenu."""
+    parent: int | None
+    submenu: bool
+    entry_id: str
+    title: str
+
+
 def _braces(line: str) -> int:
     """Structural braces only: ignore quotes, comments and ${expansions}."""
     quote = None
@@ -190,22 +199,29 @@ def _header(line: str) -> tuple[str, str]:
 
 
 def _grub_stanzas(data: bytes) -> list[_GrubStanza]:
+    return _grub_menu(data)[0]
+
+
+def _grub_menu(data: bytes) -> tuple[list[_GrubStanza], list[_GrubItem]]:
+    """The menu entries with their full IDs, and every entry and submenu header in menu order."""
     try:
         lines = data.decode("utf-8").splitlines(keepends=True)
     except UnicodeError as exc:
         raise LifecycleError("GRUB configuration is not UTF-8") from exc
     depth = 0
-    submenus: list[tuple[int, str]] = []
+    submenus: list[tuple[int, str, int]] = []
     active = None
-    result = []
+    result: list[_GrubStanza] = []
+    items: list[_GrubItem] = []
     for index, line in enumerate(lines):
         stripped = line.lstrip()
         if re.match(r"(?:submenu|menuentry)\s", stripped):
             if active is not None or not stripped.rstrip().endswith("{") or _braces(line) != 1:
                 raise LifecycleError("unsupported nested/multiline GRUB entry")
             title, identity = _header(stripped)
+            items.append(_GrubItem(submenus[-1][2] if submenus else None, stripped.startswith("submenu"), identity, title))
             if stripped.startswith("submenu"):
-                submenus.append((depth, identity))
+                submenus.append((depth, identity, len(items) - 1))
             else:
                 full_id = ">".join([item[1] for item in submenus] + [identity])
                 active = (index, depth, full_id, title)
@@ -220,7 +236,7 @@ def _grub_stanzas(data: bytes) -> list[_GrubStanza]:
             submenus.pop()
     if active or depth:
         raise LifecycleError("unbalanced GRUB entry braces")
-    return result
+    return result, items
 
 
 def _linux_commands(data: bytes, option_variables: dict | None = None) -> tuple[int, list[str], int, list[str]]:
@@ -533,6 +549,24 @@ class BootAdapter:
         if len(candidates) != 1:
             raise LifecycleError(f"normal boot discovery requires one unambiguous entry for {kernel}; found {len(candidates)}")
         return candidates[0]
+
+    def check_selector(self, entry_id: str) -> None:
+        """Refuse a GRUB default that GRUB could resolve to another menu entry. For each part of the selector GRUB
+        takes the first entry or submenu at that level whose ID or title equals it (grub-core/normal/menu.c), so
+        every part must match exactly one entry or submenu there, by its ID. Other backends select by file name."""
+        if self.backend != "grub":
+            return
+        entry_identity(entry_id, "grub")
+        _, items = _grub_menu(self._read(self.grub_config))
+        parts, parent = entry_id.split(">"), None
+        for depth, part in enumerate(parts):
+            matches = [index for index, item in enumerate(items) if item.parent == parent and part in (item.entry_id, item.title)]
+            if len(matches) > 1:
+                raise LifecycleError(f"ambiguous GRUB default {entry_id}: {len(matches)} menu entries or submenus "
+                                     f"have the ID or title {part}")
+            if not matches or items[matches[0]].entry_id != part or items[matches[0]].submenu != (depth < len(parts) - 1):
+                raise LifecycleError(f"GRUB default {entry_id} does not name exactly one menu entry")
+            parent = matches[0]
 
     def fallback_record(self, entry: BootEntry) -> dict:
         return {"entry": entry.entry_id, "kernel": entry.kernel, "sha256": hashlib.sha256(entry.descriptor).hexdigest(),

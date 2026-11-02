@@ -6,6 +6,7 @@ from contextlib import contextmanager
 import copy
 import json
 from pathlib import Path
+import re
 import struct
 import sys
 import tempfile
@@ -227,9 +228,14 @@ class PortableLifecycleTests(unittest.TestCase):
             config_path = self.root / 'boot/grub/grub.cfg'
             before = config_path.read_bytes() if config_path.exists() else b'source $prefix/nvidia-vbios.cfg\n'
             if self.nested:
-                stanza = "submenu 'Advanced options for Debian' --id 'advanced' {\n" + stanza + '}\n'
+                # One Advanced submenu holds every kernel, as grub-mkconfig writes it: GRUB resolves a selector
+                # through the first submenu with that ID, so a repeated submenu ID would be ambiguous.
+                self.nested_stanzas = [*getattr(self, 'nested_stanzas', []), stanza]
                 identity = 'advanced>' + identity
-            self.write('/boot/grub/grub.cfg', before + stanza.encode())
+                self.write('/boot/grub/grub.cfg', ("source $prefix/nvidia-vbios.cfg\nsubmenu 'Advanced options for "
+                                                   "Debian' --id 'advanced' {\n" + ''.join(self.nested_stanzas) + '}\n').encode())
+            else:
+                self.write('/boot/grub/grub.cfg', before + stanza.encode())
         elif self.true_uki:
             identity = 'normal-' + kernel + '.efi'
             self.write('/efi/EFI/Linux/' + identity, pe_image({'.linux': kernel_data, '.initrd': ('NORMAL INITRD ' + kernel).encode(),
@@ -426,12 +432,94 @@ class PortableLifecycleTests(unittest.TestCase):
             self.assertEqual(self.ops.environment, environment)
         self.assertEqual(self.ops.builds, 0)
 
-    def test_explicit_default_selection_is_refused_for_portable_boot(self):
-        self.setup_profile('systemd-boot')
-        environment = dict(self.ops.environment)
-        with self.assertRaisesRegex(LifecycleError, 'select-default'):
+    def test_explicit_selection_takes_only_the_recorded_normal_entry_of_its_kernel(self):
+        self.setup_profile(nested=True)
+        ready = self.worker.reconcile(self.new, select_default=True)  # a first build: the flag changes nothing
+        self.assertEqual(self.ops.environment['saved_entry'], ready['entry'])
+        normal = 'advanced>debian-' + self.new  # a submenu selector, recorded by the build of the new kernel
+        self.assertEqual(self.worker.restore_normal_default(), {'state': 'normal', 'entry': normal})  # as disable does
+        self.config['jobs'] = 3  # another profile: the next reconcile builds again
+        self.write_config()
+        for kernel, select, message in ((self.new, False, 'normal boot default preserved'),
+                                        (self.old, True, f'starts {self.new}, not {self.old}: use --kernel {self.new}')):
+            with self.subTest(kernel=kernel), self.assertRaisesRegex(LifecycleError, message):
+                self.worker.reconcile(kernel, select_default=select)
+        self.assertEqual((self.ops.environment, self.ops.builds), ({'saved_entry': normal}, 1))
+        self.ops.fault = 'default'
+        with self.assertRaisesRegex(LifecycleError, 'grub wrote then failed'):
             self.worker.reconcile(self.new, select_default=True)
-        self.assertEqual((self.ops.environment, self.ops.builds), (environment, 0))
+        self.assertEqual(self.ops.environment['saved_entry'], normal)
+        rebuilt = self.worker.reconcile(self.new, select_default=True)
+        self.assertEqual((rebuilt['state'], self.ops.environment['saved_entry']), ('ready', rebuilt['entry']))
+        journal = json.loads((self.root / STATE.lstrip('/') / 'transaction.json').read_bytes())
+        self.assertEqual(journal['previous_default'], normal)
+
+    def disabled_nested(self):
+        """Nested Debian GRUB after disable: the build of the new kernel recorded advanced>debian-NEW, which disable
+        restored; then the menu also lists the new kernel at the top level, with the same recipe."""
+        self.setup_profile(nested=True)
+        self.worker.reconcile(self.new)
+        normal = 'advanced>debian-' + self.new
+        self.assertEqual(self.worker.restore_normal_default(), {'state': 'normal', 'entry': normal})
+        grub = self.root / 'boot/grub/grub.cfg'
+        atomic_write(grub, grub.read_bytes() + (f"menuentry 'Debian {self.new}' --class debian --id 'debian-{self.new}' {{\n"
+                                                f"    linux /vmlinuz-{self.new} {OPTIONS}\n"
+                                                f"    initrd /intel-ucode.img /initrd.img-{self.new}\n}}\n").encode())
+        self.assertEqual(self.worker.boot.discover(self.new).entry_id, 'debian-' + self.new)
+        self.config['jobs'] = 3
+        self.write_config()
+        return normal
+
+    def test_explicit_selection_needs_the_recorded_entry_as_the_default(self):
+        # The conventional normal entry of the kernel, but not the one recorded and restored by disable.
+        normal = self.disabled_nested()
+        self.ops.environment = {'saved_entry': 'debian-' + self.new}
+        with self.assertRaisesRegex(LifecycleError, 'foreign or unrelated boot default preserved; --select-default '
+                                                    'replaces only ' + re.escape(normal)):
+            self.worker.reconcile(self.new, select_default=True)
+        self.assertEqual((self.ops.environment, self.ops.builds), ({'saved_entry': 'debian-' + self.new}, 1))
+
+    def test_explicit_selection_needs_the_recorded_entry_to_stay_the_conventional_one(self):
+        # The recorded entry is still the default, but the kernel's conventional normal entry is now another one.
+        normal = self.disabled_nested()
+        with self.assertRaisesRegex(LifecycleError, re.escape(f'{normal}, the normal entry disable restored, is not the '
+                                                              f'normal entry of {self.new} (debian-{self.new} is)')):
+            self.worker.reconcile(self.new, select_default=True)
+        self.assertEqual((self.ops.environment, self.ops.builds), ({'saved_entry': normal}, 1))
+
+    def test_explicit_selection_refuses_a_submenu_id_that_grub_finds_twice(self):
+        self.setup_profile(nested=True)
+        self.worker.reconcile(self.new)
+        normal = self.worker.restore_normal_default()['entry']
+        self.config['jobs'] = 3
+        self.write_config()
+        grub = self.root / 'boot/grub/grub.cfg'
+        include, rest = grub.read_bytes().split(b'\n', 1)
+        # GRUB would enter this first submenu named advanced and then boot its first entry.
+        atomic_write(grub, include + b"\nsubmenu 'Other systems' --id 'advanced' {\n    menuentry 'Windows' --id 'windows' {\n"
+                     b"        chainloader /EFI/Microsoft/Boot/bootmgfw.efi\n    }\n}\n" + rest)
+        with self.assertRaisesRegex(LifecycleError, f'ambiguous GRUB default {re.escape(normal)}: 2 menu entries or '
+                                                    'submenus have the ID or title advanced'):
+            self.worker.reconcile(self.new, select_default=True)
+        self.assertEqual((self.ops.environment, self.ops.builds), ({'saved_entry': normal}, 1))
+
+    def test_driver_drift_ignores_the_selection_flag(self):
+        self.setup_profile('grub')
+        self.worker.reconcile(self.new)
+        managed = self.root / f'usr/lib/modules/{self.new}/updates/vbios-override'
+        dkms = self.write(f'/usr/lib/modules/{self.new}/updates/dkms/nvidia.ko', json.dumps({'version': '615.78.08'}).encode())
+        self.ops.selected_module = lambda kernel, name: str(managed / (name + '.ko') if managed.exists() else dkms)
+        self.ops.version = '615.78.08'
+        self.assertEqual(self.worker.reconcile(self.new)['state'], 'driver-drift')
+        # A newer kernel's normal entry is a safe default under drift; --select-default alone would refuse it.
+        newer = '6.12.11-amd64'
+        self.add_kernel(newer)
+        self.ops.environment = {'saved_entry': 'debian-' + newer}
+        results = [self.worker.reconcile(self.new, select_default=select) for select in (False, True)]
+        for result in results:
+            result.pop('finished')
+        self.assertEqual(results[1], results[0])
+        self.assertEqual((results[1]['state'], self.ops.environment), ('driver-drift', {'saved_entry': 'debian-' + newer}))
 
     def _assert_unmanaged_artifact_is_preserved(self, backend, artifact):
         self.setup_profile(backend)

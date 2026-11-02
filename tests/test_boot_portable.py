@@ -127,6 +127,36 @@ class PortableBootTests(unittest.TestCase):
         with self.assertRaises(LifecycleError):
             entry_identity('advanced>nested', 'systemd-boot')
 
+    def test_grub_default_must_name_one_entry_at_every_level(self):
+        # GRUB takes, for each part of the default, the first entry or submenu at that level whose ID or title is it.
+        stanza = self.grub()
+        chain = "menuentry '{title}' --id '{identity}' {{\n    chainloader /EFI/other.efi\n}}\n"
+        nested = stanza.replace("'normal'", "'nested'")
+        submenu = "submenu 'Advanced options' --id advanced {\n" + nested + chain.format(title='Other', identity='inner') + '}\n'
+        accepted = {'normal': stanza + submenu, 'advanced>nested': stanza + submenu,
+                    # The same ID at another level is not on GRUB's path.
+                    'advanced>inner': stanza + submenu + chain.format(title='Top', identity='inner')}
+        refused = (('normal', '2 menu entries', chain.format(title='Windows', identity='normal') + stanza),
+                   ('normal', '2 menu entries', chain.format(title='normal', identity='windows') + stanza),
+                   ('advanced>nested', '2 menu entries', submenu.replace("'Advanced options'", "'Other'") + stanza + submenu),
+                   ('advanced>nested', '2 menu entries', stanza + submenu.replace("'Other' --id 'inner'", "'nested' --id 'inner'")),
+                   ('advanced', 'does not name exactly one', stanza + submenu),  # a submenu, not an entry
+                   ('advanced>normal', 'does not name exactly one', stanza + submenu),
+                   ('missing', 'does not name exactly one', stanza),
+                   # Only the title of another entry: GRUB would boot that entry.
+                   ('Windows', 'does not name exactly one', chain.format(title='Windows', identity='windows') + stanza))
+        adapter = self.adapter()
+        for selector, data in accepted.items():
+            with self.subTest(selector=selector):
+                self.write('/boot/grub/grub.cfg', data.encode())
+                adapter.check_selector(selector)
+        for selector, message, data in refused:
+            with self.subTest(selector=selector, data=data):
+                self.write('/boot/grub/grub.cfg', data.encode())
+                with self.assertRaisesRegex(LifecycleError, message):
+                    adapter.check_selector(selector)
+        self.adapter('systemd-boot').check_selector('normal.conf')  # systemd-boot selects by file name
+
     def test_different_recipes_require_explicit_selection(self):
         stanza = self.grub()
         self.write('/boot/grub/grub.cfg', (stanza + stanza.replace("'normal'", "'alternate'").replace('rw quiet', 'rw debug')).encode())

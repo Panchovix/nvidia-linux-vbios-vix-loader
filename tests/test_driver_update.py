@@ -3,12 +3,13 @@ import copy
 import json
 from pathlib import Path
 import unittest
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 import test_bootstrap as fixtures
 from test_lifecycle import OLD
 from nvidia_vbios.driver_update import DriverUpdate
 from nvidia_vbios.bootstrap import BASE, CONFIG, ENABLED
+from nvidia_vbios.lifecycle.engine import Reconciler
 from nvidia_vbios.lifecycle.security import LifecycleError, atomic_write, hash_file
 
 
@@ -76,6 +77,14 @@ class PostInstallTests(unittest.TestCase):
         self.assertEqual(self.f.ops.environment['saved_entry'],result['entry'])
         self.assertEqual(self.read_config()['sources'][0]['path'],result['snapshot'])
         for name,sha in boot_before.items(): self.assertEqual(hash_file(self.f.worker.path(name)),sha)
+
+    def test_post_install_reconciles_without_selecting_the_default(self):
+        # It keeps the READY entry (or the fail-safe's normal entry) as the default itself; --select-default is
+        # only for an explicit reconcile after disable.
+        original = Reconciler.reconcile
+        with patch.object(Reconciler, 'reconcile', autospec=True, side_effect=original) as reconcile:
+            self.assertEqual(self.run_update()['state'], 'complete')
+        reconcile.assert_called_once_with(ANY, OLD)
 
     def test_preflight_errors_do_not_suspend_or_write(self):
         cases=('unsupported','headers','version','uuid','transition','foreign','missing-default','busy')

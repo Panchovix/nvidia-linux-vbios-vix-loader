@@ -92,5 +92,7 @@ class CallbackTests(unittest.TestCase):
     update.assert_called_once_with(worker.root,worker.ops)
     update.return_value.auto_source.assert_called_once_with('615.78.08')
     self.assertEqual(worker.reconcile.call_count,calls)
+    if calls:  # never --select-default: a failed build rolls back to the normal entry, as the fail-safe left it
+     worker.reconcile.assert_called_once_with('6.10')
     self.assertEqual(result['state'],'ready' if calls else 'driver-drift')
     self.assertEqual(result['source_fetch'],{'state':state})
