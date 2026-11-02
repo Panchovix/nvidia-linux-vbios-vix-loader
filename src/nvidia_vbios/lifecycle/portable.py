@@ -14,7 +14,7 @@ import time
 from .boot import BootAdapter, entry_identity
 from .config import load_config, select_source
 from .engine import (Reconciler, CONFIG, STATE, ACTIVATION_PATH, FORCE_PATH, FORCE_BYTES,
-                     ACTIVATION_GENERATION, modprobe_configuration, typed_parameters)
+                     ACTIVATION_GENERATION, BOOTABLE_IMAGES, modprobe_configuration, typed_parameters)
 from .security import LifecycleError, checked_path, digest, hash_file, json_write, atomic_write, token
 
 EFI_GUID = '4a67b082-0a4c-41cf-b6c7-440b29bb8c4f'
@@ -159,11 +159,133 @@ class PortableReconciler(Reconciler):
     def _fallback(self, config, fleet):
         normal = fleet.get('normal_fallback', config.raw.get('normal_boot'))
         last = fleet.get('last_ready')
-        if last:
+        if fleet.get('boot_recovery'):
+            # A new transaction temporarily selects its staged override in the
+            # rootfs; the guard checked the stock driver before publication.
+            self._validate_normal(config, fleet['boot_recovery']['normal'])
+        elif last:
             self._verify_boot_files(last)
         else:
             self._validate_normal(config, normal)
         return normal
+
+    def _os_modules_present(self, kernel):
+        """Check depmod's recorded OS inventory, not just an empty/updates tree.
+
+        This detects removed trees and missing indexed modules; it is not a
+        byte manifest of every OS module or firmware file.
+        """
+        directory = self.path(f'/usr/lib/modules/{token(kernel)}')
+        index = directory / 'modules.dep'
+        self.trusted(index)
+        recorded = []
+        for line in index.read_text().splitlines():
+            module, separator, dependencies = line.partition(':')
+            if not separator or not module:
+                raise LifecycleError('invalid OS modules.dep inventory')
+            recorded.extend([module, *dependencies.split()])
+        if not any(name.startswith('kernel/') for name in recorded):
+            raise LifecycleError('OS kernel module inventory is empty or contains only updates')
+        for name in set(recorded):
+            path = directory / name
+            if not path.is_relative_to(directory) or '..' in Path(name).parts:
+                raise LifecycleError('invalid OS module inventory path')
+            self.trusted(path)
+            if not path.is_file():
+                raise LifecycleError('OS module inventory references a missing file')
+
+    def _ready_rootfs_intact(self, fleet):
+        """Boot copies alone cannot replace the OS modules removed by pacman."""
+        last = fleet.get('last_ready')
+        if not last:
+            return True
+        try:
+            self._verify_boot_files(last)
+            self._os_modules_present(last['kernel'])
+            records = fleet.get('kernels', {}).get(last['kernel'], {}).get('deployment', [])
+            modules = [item for item in records if item['path'].startswith(
+                f"/usr/lib/modules/{last['kernel']}/")]
+            if not modules:
+                return False
+            for item in modules:
+                path = self.path(item['path']); self.trusted(path)
+                if hash_file(path) != item['after_sha256']:
+                    return False
+            return True
+        except (LifecycleError, OSError, KeyError, TypeError):
+            return False
+
+    def _recovery_normal(self, config, kernel, version, record=None):
+        self._os_modules_present(kernel)
+        entry = self._validate_normal(config, record) if record else self.boot.discover(kernel)
+        if 'nvidia.NVreg_Registry' in entry.options or 'RmLinuxVbiosOverride' in entry.options:
+            raise LifecycleError('normal recovery entry contains foreign VBIOS activation')
+        self.boot.check_selector(entry.entry_id)
+        stock, stock_version = self._stock_module(kernel, [])
+        if stock_version != version or self._normal_image_state(config, kernel, version) not in BOOTABLE_IMAGES:
+            raise LifecycleError('normal recovery driver or initramfs is incompatible or unknown')
+        self.trusted(Path(stock))
+        metadata = self.ops.modinfo(Path(stock))
+        if metadata.get('vermagic', '').split()[:1] != [kernel]:
+            raise LifecycleError('normal recovery module does not match the kernel')
+        return self.boot.fallback_record(entry)
+
+    def _guard_recovery(self, config, fleet):
+        recovery = fleet['boot_recovery']
+        environment = self.ops.grub_environment()
+        self._check_option_variables(config, environment)
+        if environment.get('next_entry') or environment.get('prev_saved_entry'):
+            raise LifecycleError('another boot transition is pending; boot default preserved')
+        saved = environment.get('saved_entry')
+        if saved not in (recovery['previous_entry'], recovery['normal']['entry']):
+            raise LifecycleError('foreign or unrelated boot default preserved')
+        normal = self._recovery_normal(config, recovery['normal']['kernel'],
+                                       self.ops.installed_version(config.raw), recovery['normal'])
+        if saved != normal['entry']:
+            if self.ops.grub_environment() != environment:
+                raise LifecycleError('boot selection changed during fallback validation')
+            self.ops.set_default(normal['entry'])
+            if self.ops.grub_environment().get('saved_entry') != normal['entry']:
+                raise LifecycleError('normal recovery selection did not persist')
+        return normal['entry']
+
+    def _recover_fallback_locked(self, config, kernel, error):
+        # Only rolling package replacement needs this path. Fedora retains its
+        # existing recovery behavior, and driver drift is handled before here.
+        if config.raw.get('userspace', {}).get('provider') != 'pacman':
+            return None
+        fleet = self._effective_fleet(config)
+        last = fleet.get('last_ready')
+        if not last or self._ready_rootfs_intact(fleet):
+            return None
+        environment = self.ops.grub_environment()
+        self._check_option_variables(config, environment)
+        if environment.get('next_entry') or environment.get('prev_saved_entry'):
+            raise LifecycleError('incomplete READY fallback; pending boot transition preserved')
+        current = environment.get('saved_entry')
+        recovery = fleet.get('boot_recovery')
+        owned = {last['entry']}
+        if recovery:
+            owned.add(recovery['normal']['entry'])
+        if current not in owned:
+            raise LifecycleError('incomplete READY fallback; foreign boot default preserved')
+        version = self.ops.installed_version(config.raw)
+        normal = self._recovery_normal(config, kernel, version)
+        recovery = {'phase': 'selecting', 'previous_entry': last['entry'], 'normal': normal,
+                    'reason': 'ready-rootfs-unavailable'}
+        # Durable ownership before selection also makes interruption retryable.
+        raw = self._json(self.state / 'fleet.json')
+        json_write(self.state / 'fleet.json', dict(raw, boot_recovery=recovery))
+        if self.ops.grub_environment() != environment:
+            raise LifecycleError('boot selection changed during fallback validation')
+        selected = self._guard_recovery(config, dict(fleet, boot_recovery=recovery))
+        recovery['phase'] = 'selected'
+        json_write(self.state / 'fleet.json', dict(raw, boot_recovery=recovery, normal_fallback=normal))
+        return {'state': 'fallback', 'marker': 'VBIOS_BLOCKED', 'kernel': kernel,
+                'entry': selected, 'previous_ready': last['entry'], 'previous_ready_complete': False,
+                'recovery': 'normal', 'next_boot_override': False,
+                'boots_normal_driver': True, 'normal_image': self._normal_image_state(config, kernel, version),
+                'error': str(error), 'finished': time.time()}
 
     def _normal_entry_id(self, kernel, config):
         return self.boot.discover(kernel).entry_id
@@ -230,6 +352,8 @@ class PortableReconciler(Reconciler):
         return entry
 
     def _guard_default(self, config, fleet, select=None):
+        if fleet.get('boot_recovery') and not fleet.get('drift'):
+            return self._guard_recovery(config, fleet)
         if fleet.get('drift'):
             return self._guard_drift(config, fleet)
         normal = self._fallback(config, fleet)
@@ -412,6 +536,7 @@ class PortableReconciler(Reconciler):
                 'force_driver_sha256':digest(b''.join(evidence[k] for k in sorted(evidence)))}
 
     def _record_boot_publication(self,fleet,plan,publication,deployment):
+        fleet.pop('boot_recovery', None)
         generations=fleet.setdefault('boot_generations',{})
         generations[plan['entry']]={'kernel':plan['kernel'],'managed_id':plan['managed_id'],
             'backend':self.boot.backend,'boot':self.boot.config,'files':publication['boot_files'],

@@ -190,13 +190,30 @@ Ejecuta esto desde un clon de este repositorio.
    override, y vuelve a compilar un kernel cuando una nueva revisión del paquete las cambia. Un `--driver-source` que
    entregaste también las recibe, y un parche que ya está en él se detecta y se deja como está.
 
-   `dkms.conf` solo se lee, nunca se ejecuta: las entradas que no puede leer sin ejecutar código de shell se omiten y
-   aparecen en `skipped`, y `reconcile --dry-run` muestra lo que selecciona antes de compilar. Cada parche debe
-   aplicarse como lo aplica DKMS (exactamente, o con el fuzz por defecto de GNU patch) y no puede cambiar un archivo
-   que lee el parche del override, o la compilación se detiene y dice por qué. Sin ese `dkms.conf`, como con el driver
-   `.run`, nada cambia. `sudo nvbios system status` los muestra en `distribution_patches` (si la compilación falló,
-   también en `last_attempt`), y `/var/lib/nvidia-vbios/lifecycle/status-KERNEL.json` guarda el SHA-256 de cada
-   parche.
+   Las configuraciones locales del módulo DKMS `nvidia` se leen después de la del paquete, en este orden:
+   `/etc/dkms/nvidia.conf`, `nvidia-VERSIÓN.conf`, `nvidia-VERSIÓN-KERNEL.conf` y
+   `nvidia-VERSIÓN-KERNEL-ARQUITECTURA.conf` en el mismo directorio. Las asignaciones posteriores reemplazan las
+   anteriores. Los parches de `/etc/dkms/nvidia/patches/` tienen prioridad sobre los del paquete.
+
+   La configuración solo se lee, nunca se ejecuta. Se admiten directivas literales `PATCH`, `PATCH_MATCH` y
+   `PRE_BUILD`; si la preparación necesita evaluar código de shell arbitrario, la compilación se detiene y explica
+   el motivo. `reconcile --dry-run` muestra los insumos elegidos sin ejecutar scripts. Cada parche debe aplicarse
+   como lo aplica DKMS (exactamente o con el fuzz por defecto de GNU patch) y conservar los archivos que lee el
+   parche del override.
+
+   El script ejecutable `PRE_BUILD` seleccionado corre después de los parches de la distro y antes del override,
+   con los privilegios de la compilación, un timeout de 120 segundos y salida en el log. Usa copias desechables:
+   los scripts del paquete trabajan en la copia de las fuentes DKMS; los de `/etc/dkms/nvidia/`, en una copia de su
+   directorio de apoyo. Esto no es un sandbox de seguridad: los scripts deben ser de confianza y sus rutas absolutas
+   no se redirigen. Los helpers adicionales de las fuentes deben existir en el código del driver seleccionado. Solo
+   se admiten argumentos literales y sustituciones de `kernelver`, `arch` y `kernel_source_dir`. Un fallo del script
+   o un cambio de los archivos que usa el parche del override impide publicar. Los cambios de configuración, parches
+   o scripts invalidan la compilación guardada y se comprueban nuevamente después de compilar.
+
+   Sin un `dkms.conf` del paquete, como con el driver `.run`, nada cambia. `sudo nvbios system status` muestra la
+   preparación en `distribution_patches` (si falló, también en `last_attempt`); el estado del kernel guarda los
+   hashes y un fallo de PRE_BUILD identifica su log. Estas rutas tienen pruebas sintéticas, no una actualización
+   probada en hardware. Otros nombres de módulos DKMS y la configuración dinámica quedan fuera de este adaptador.
 
 5. Reinicia. Tu entrada normal sigue en el menú de arranque. Tras reiniciar, `sudo nvbios system status`
    compara el módulo y los parámetros cargados con los preparados.
@@ -279,6 +296,17 @@ anterior a esta versión rechaza la opción (`only reviewed for Fedora BLS entri
 `sudo nvbios system install --repository "$PWD"`.
 
 ## Si algo sale mal
+
+Con el proveedor de driver `pacman`, si falla la recompilación tras una actualización rolling, también se comprueba
+que el kernel READY anterior conserve sus módulos del sistema. Guardar su kernel e initramfs privados no conserva
+los módulos que eliminó el gestor de paquetes. Si ese árbol falta o está incompleto, se selecciona la entrada normal
+del kernel nuevo solo después de verificar su inventario de módulos, driver NVIDIA compatible e imagen de arranque.
+El estado indica `fallback` con `VBIOS_BLOCKED`: falló la compilación del override y el próximo arranque usa la entrada
+normal. No afirma que las GPU actualmente cargadas hayan cambiado. Una recompilación posterior exitosa vuelve a
+seleccionar el override. Se respetan las selecciones ajenas, los arranques únicos pendientes, los rechazos de
+`--select-default` y los rollbacks fallidos. Si no se puede validar una entrada normal, la predeterminada queda igual
+y se explica el fallo; sigue siendo útil tener un kernel alternativo instalado. Esta recuperación solo tiene pruebas
+sintéticas y detecta módulos indexados ausentes, no cualquier corrupción posible del sistema.
 
 - Elige tu entrada **normal** en el menú de arranque (pulsa Esc o mantén Shift mientras el equipo arranca); no
   carga ningún override. Igual usa los módulos que compiló esta herramienta, así que no sirve tras una

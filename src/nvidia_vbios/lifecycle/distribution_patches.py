@@ -1,29 +1,22 @@
-"""Build fixes a distribution's DKMS package applies to the NVIDIA open kernel modules.
+"""Prepare NVIDIA open sources for the installed nvidia DKMS module package.
 
-Ubuntu ships the unmodified source of the open modules in nvidia-kernel-source-*
-and carries build fixes for its own kernels in the nvidia-dkms-* package: PATCH[n]
-and PATCH_MATCH[n] entries of /usr/src/nvidia-VERSION/dkms.conf, with the files in
-patches/ beside it. The loader builds the same release from its own copy, so it
-applies the patches DKMS would select for the target kernel, in the same order and
-from the same source root (the top of kernel-open when the package holds that
-directory's contents, as Ubuntu's does), before the override patch.
+Read literal PATCH/PATCH_MATCH and PRE_BUILD directives without executing shell
+configuration. The package configuration and four documented /etc overrides are
+cumulative, in increasing specificity. /etc/dkms/nvidia/patches overlays package
+patches. Unknown preparation syntax blocks a build instead of silently omitting
+source transformations. Other build directives remain outside this reader.
 
-dkms.conf is shell, but it is only read here, never run. An entry counts when it
-is a plain top-level PATCH[n]=value or PATCH_MATCH[n]=value assignment whose value
-needs no expansion, and a PATCH_MATCH regular expression only within a subset that
-bash reads the same way in every locale; the loader evaluates it without
-backtracking. Any other mention of PATCH or PATCH_MATCH, even inside a string, and
-any shell block the reader cannot follow make every entry unknown. Entries it
-cannot read are skipped with the reason in the build record, and the build then
-sees the source as it did before this step.
+Selected patches run before PRE_BUILD, then the VBIOS override. Scripts run only
+in disposable copies, with explicit argv, bounded execution and a build log.
+The package script and patch data may be added to the upstream source copy;
+missing upstream source files are never filled from a different package tree.
+Additional package helpers must already exist in the enrolled source. An /etc
+script runs from a disposable mirror of its /etc cwd and supporting files.
+Hardcoded absolute paths inside scripts are not rewritten or sandboxed.
 
-The patches come only from the package's patches/ directory, under the trust rules
-of every other root-owned input. Each one is first tried on a throwaway copy of the
-source, in both directions: exactly, then with GNU patch's default fuzz, which DKMS
-applies them with. A patch the source already has (a pre-patched --driver-source)
-applies only in reverse and is recorded as already applied. One that applies in
-neither direction, or in both and changes the source either way, stops the build.
-The finished source must have every file the override patch reads as it was.
+Configuration, patches and script support are pinned in the preparation identity,
+which invalidates cached builds and is rechecked before publication. All inputs
+must follow the lifecycle's ownership, permissions and no-symlink trust rules.
 """
 from __future__ import annotations
 import json
@@ -31,9 +24,10 @@ import os
 from pathlib import Path
 import re
 import shutil
+import shlex
 import stat
 
-from .security import LifecycleError, atomic_write, checked_path, digest
+from .security import LifecycleError, atomic_write, checked_path, digest, source_tree_hash, token
 
 PACKAGE = "usr/src/nvidia-{version}"
 MAX_CONF = 1 << 16
@@ -42,7 +36,8 @@ MAX_MATCH = 256
 MAX_GROUPS = 32
 _NAME = re.compile(r"[A-Za-z0-9._+-]+")
 _ENTRY = re.compile(r"[ \t]*(PATCH|PATCH_MATCH)\[(0|[1-9][0-9]{0,3})\]=(.*)", re.S)
-_MENTION = re.compile(r"\bPATCH(?:_MATCH)?\b")
+_PRE_ENTRY = re.compile(r"[ \t]*(PRE_BUILD)=(.*)", re.S)
+_MENTION = re.compile(r"\b(?:PATCH(?:_MATCH)?|PRE_BUILD)\b")
 _PLAIN = re.compile(r"[A-Za-z0-9._+,:=@%^/*?\[\]-]*")
 # Tokens that open or close a shell block, in order: words, subshells, command substitutions, backquotes.
 _TOKENS = re.compile(r"\$\(|[()`]|[^\s;&|()<>`]+")
@@ -319,10 +314,11 @@ def _regex(value):
     return _Pattern(value, tree)
 
 
-def parse(data):
-    """Read the PATCH and PATCH_MATCH entries of dkms.conf bytes without running anything.
+def parse(data, *, variables=None):
+    """Read preparation entries of dkms.conf bytes without running anything.
 
     Returns {"PATCH": {index: value}, "PATCH_MATCH": {index: value or _Pattern},
+    "PRE_BUILD": {0: command},
     "unsupported": {(key, index): reason}, "certain": {PATCH indices always set},
     "problem": reason or None}. A problem means the entries cannot be known at all:
     PATCH or PATCH_MATCH mentioned anywhere else, even inside a string, eval,
@@ -332,7 +328,7 @@ def parse(data):
     or |; such a PATCH entry may not be set, so DKMS may count one entry fewer. A
     later assignment replaces an earlier one, as in the shell.
     """
-    result = {"PATCH": {}, "PATCH_MATCH": {}, "unsupported": {}, "certain": set(), "problem": None}
+    result = {"PATCH": {}, "PATCH_MATCH": {}, "PRE_BUILD": {}, "unsupported": {}, "certain": set(), "problem": None}
     text = data.decode("latin-1").replace("\r\n", "\n")   # DKMS drops the CR that ends each value
     if "\0" in text:
         result["problem"] = "dkms.conf contains NUL bytes"
@@ -355,13 +351,16 @@ def parse(data):
             result["problem"] = f"dkms.conf line {number}: shell blocks do not nest"
             return result
         entry = _ENTRY.fullmatch(code)
-        if entry is None:
+        pre_entry = _PRE_ENTRY.fullmatch(code)
+        if entry is None and pre_entry is None:
             if _MENTION.search(code):
                 result["problem"] = f"dkms.conf line {number}: PATCH is used outside a plain PATCH[n]=value assignment"
                 return result
             continue
-        key, index = entry[1], int(entry[2])
-        raw, rest = entry[3], mask[entry.start(3):].rstrip(" \t")
+        key, index = (entry[1], int(entry[2])) if entry else ("PRE_BUILD", 0)
+        value_start = entry.start(3) if entry else pre_entry.start(2)
+        raw = entry[3] if entry else pre_entry[2]
+        rest = mask[value_start:].rstrip(" \t")
         # PATCH[0]="fix.patch"; and, in a case branch, PATCH[0]="fix.patch" ;;
         for ending in ((";;", ";") if stack and stack[-1] == "case" else (";",)):
             if rest.endswith(ending):
@@ -379,6 +378,9 @@ def parse(data):
                 raise Unsupported("is conditional (the line before ends with &&, || or |)")
             if key == "PATCH":
                 result["certain"].add(index)
+            if key == "PRE_BUILD" and variables:
+                raw = re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)",
+                             lambda match: variables.get(match[1] or match[2], match[0]), raw)
             value = _value(raw)
             result[key][index] = _regex(value) if key == "PATCH_MATCH" and value else value
         except Unsupported as exc:
@@ -452,41 +454,119 @@ def _trusted_bytes(path, root, limit, label):
     return data
 
 
-def plan(root, version, kernel):
-    """What the distribution's dkms.conf applies to `version` for `kernel`, or None without one.
+def _present(path):
+    return path.exists() or path.is_symlink()
 
-    Reads dkms.conf and the selected patches now, under the trust rules of every
-    root-owned input (LifecycleError when one fails). The record says which file
-    was read; apply() fills in what each patch did.
+
+def _relative_name(name, label):
+    parts = name.removeprefix("./").split("/")
+    if not all(_NAME.fullmatch(part) and part not in (".", "..", ".git") for part in parts):
+        raise LifecycleError(f"{label} is not a file name inside the DKMS source: {name!r}")
+    return "/".join(parts)
+
+
+def _configuration(root, package, version, kernel, arch):
+    """DKMS's four documented overrides, sourced cumulatively in specificity order.
+
+    Only preparation directives are interpreted. No configuration file is executed.
+    Concatenation preserves array elements not assigned by a later override.
+    """
+    files = [package / "dkms.conf", *(root / "etc/dkms" / (name + ".conf") for name in
+             ("nvidia", f"nvidia-{version}", f"nvidia-{version}-{kernel}", f"nvidia-{version}-{kernel}-{arch}"))]
+    records, contents = [], []
+    for path in files:
+        if _present(path):
+            shown = "/" + path.relative_to(root).as_posix()
+            data = _trusted_bytes(path, root, MAX_CONF, f"distribution DKMS configuration {shown}")
+            records.append({"path": shown, "sha256": digest(data)})
+            contents.append(data)
+    return records, b"\n".join(contents)
+
+
+def plan(root, version, kernel, *, arch=None):
+    """Pin static DKMS preparation inputs, overrides and optional PRE_BUILD.
+
+    Unknown preparation shell syntax fails closed. Other DKMS directives are not
+    evaluated. PRE_BUILD supports literal argv and the documented kernelver and
+    kernel_source_dir substitutions, plus arch; it never runs dkms.conf as shell.
     """
     root = Path(root)
+    version, kernel = token(version, "driver version"), token(kernel)
+    arch = token(arch or os.uname().machine, "architecture")
     package = root / PACKAGE.format(version=version)
     conf = package / "dkms.conf"
-    if not (conf.exists() or conf.is_symlink()):
+    if not _present(conf):
         return None
     shown = "/" + conf.relative_to(root).as_posix()
-    directory = shown.removesuffix("dkms.conf") + "patches"
-    data = _trusted_bytes(conf, root, MAX_CONF, f"distribution DKMS configuration {shown}")
-    selected, skipped = select(parse(data), kernel)
+    configs, data = _configuration(root, package, version, kernel, arch)
+    parsed = parse(data, variables={"kernelver": kernel, "arch": arch,
+                                   "kernel_source_dir": str(root / f"lib/modules/{kernel}/build")})
+    if parsed["problem"]:
+        raise LifecycleError(f"unsupported DKMS source preparation in {shown}: {parsed['problem']}")
+    if parsed["unsupported"]:
+        raise LifecycleError("unsupported DKMS source preparation: " + "; ".join(parsed["unsupported"].values()))
+    selected, skipped = select(parsed, kernel)
     layout = _layout(package)
-    if selected and layout is None:
-        skipped += [{"index": index, "name": name, "reason": "the package's source layout is not recognised"}
-                    for index, name, _ in selected]
-        selected = []
+    pre_value = parsed["PRE_BUILD"].get(0, "")
+    if (selected or pre_value) and layout is None:
+        raise LifecycleError("the package's source layout is not recognised for DKMS source preparation")
     patches = []
+    override = root / "etc/dkms/nvidia"
     for index, name, match in selected:
         label = f"dkms.conf PATCH[{index}]"
-        parts = name.split("/")
-        if not all(_NAME.fullmatch(part) and part not in (".", "..") for part in parts):
-            raise LifecycleError(f"{label} is not a file name inside {directory}: {name!r}")
-        path = package.joinpath("patches", *parts)
-        if not (path.exists() or path.is_symlink()):
-            raise LifecycleError(f"{label} names {name}, which is missing from {directory}")
+        # Patch paths are deliberately stricter than script's optional ./ prefix.
+        if name.startswith("./"):
+            raise LifecycleError(f"{label} is not a file name inside patches: {name!r}")
+        name = _relative_name(name, label)
+        path = override / "patches" / name
+        if not _present(path):
+            path = package / "patches" / name
+        if not _present(path):
+            raise LifecycleError(f"{label} names {name}, which is missing from the DKMS patches directories")
         content = _trusted_bytes(path, root, MAX_PATCH, f"{label} ({name})")
-        patches.append({"index": index, "name": name, "match": match, "sha256": digest(content), "data": content})
-    record = {"dkms_conf": shown, "dkms_conf_sha256": digest(data), "kernel": kernel, "source_root": layout,
-              "applied": [], "already_applied": [], "skipped": skipped}
-    return {"record": record, "patches": patches, "source_root": layout}
+        patches.append({"index": index, "name": name, "match": match, "sha256": digest(content), "data": content,
+                        "path": "/" + path.relative_to(root).as_posix()})
+    pre_build = None
+    if pre_value:
+        # DKMS evaluates the directive as a command. Support argv, never command
+        # operators, redirections, expansions or globbing in that command.
+        if re.search(r"[;&|<>()$`*?\[\]{}~\\\n]", pre_value):
+            raise LifecycleError("unsupported DKMS PRE_BUILD command syntax")
+        try:
+            argv = shlex.split(pre_value)
+        except ValueError as exc:
+            raise LifecycleError(f"unsupported DKMS PRE_BUILD arguments: {exc}") from None
+        if not argv:
+            raise LifecycleError("DKMS PRE_BUILD is not a script name")
+        name = _relative_name(argv[0], "DKMS PRE_BUILD")
+        path = override / name
+        is_override = False
+        if _present(path):
+            _trusted_bytes(path, root, MAX_PATCH, "DKMS PRE_BUILD override")
+            is_override = bool(path.stat().st_mode & 0o111)
+        if not is_override:
+            path = package / name
+        script = _trusted_bytes(path, root, MAX_PATCH, "DKMS PRE_BUILD script")
+        if not path.stat().st_mode & 0o111:
+            raise LifecycleError(f"DKMS PRE_BUILD script is not executable: {path}")
+        pre_build = {"name": name, "arguments": argv[1:], "path": "/" + path.relative_to(root).as_posix(),
+                     "sha256": digest(script), "data": script, "mode": stat.S_IMODE(path.stat().st_mode),
+                     "override": is_override, "support_root": override if is_override else package,
+                     "support_sha256": source_tree_hash(override if is_override else package, root),
+                     "patch_overlay_sha256": (source_tree_hash(override / "patches", root)
+                                              if _present(override / "patches") else None)}
+    record = {"dkms_conf": shown, "dkms_conf_sha256": configs[0]["sha256"], "kernel": kernel,
+              "source_root": layout, "applied": [], "already_applied": [], "skipped": skipped,
+              "configuration_files": configs, "architecture": arch,
+              "pre_build": ({key: pre_build[key] for key in
+                            ("name", "arguments", "path", "sha256", "override", "support_sha256", "patch_overlay_sha256")}
+                            if pre_build else None)}
+    identity = {"schema": 1, "configuration_files": configs, "kernel": kernel, "architecture": arch,
+                "source_root": layout, "pre_build": record["pre_build"],
+                "patches": [{key: patch[key] for key in ("index", "name", "match", "sha256", "path")}
+                            for patch in patches]}
+    record["preparation_sha256"] = digest(json.dumps(identity, sort_keys=True).encode())
+    return {"record": record, "patches": patches, "source_root": layout, "pre_build": pre_build, "root": root}
 
 
 def preview(planned):
@@ -496,16 +576,32 @@ def preview(planned):
 
 
 def changed_selection(previous, planned):
-    """Whether a prepared build no longer has the patches dkms.conf selects now (by index, name and SHA-256).
+    """Whether a READY build's pinned DKMS preparation inputs changed.
 
-    A build made before the loader applied distribution patches has no record and is kept as it is."""
-    if not isinstance(previous, dict) or "distribution_patches" not in previous:
+    Legacy stock-only records keep their patch comparison; newly supported local
+    overrides and scripts require a fresh build with a preparation identity.
+    """
+    if not isinstance(previous, dict):
+        previous = {}
+    record = previous.get("distribution_patches")
+    if planned is None:
+        return isinstance(record, dict)
+    wanted = planned["record"]
+    if isinstance(record, dict) and record.get("preparation_sha256"):
+        return record["preparation_sha256"] != wanted["preparation_sha256"]
+    new_inputs = (wanted.get("pre_build") or len(wanted.get("configuration_files", [])) > 1
+                  or any(patch["path"].startswith("/etc/") for patch in planned["patches"]))
+    if new_inputs:
+        return True
+    # Preserve legacy no-hook behavior: existing stock-only READY builds already
+    # compared selected patch bytes. Only newly supported inputs force migration.
+    if "distribution_patches" not in previous:
         return False
-    record = previous["distribution_patches"] if isinstance(previous["distribution_patches"], dict) else {}
+    record = record if isinstance(record, dict) else {}
     built = sorted((item.get("index"), item.get("name"), item.get("sha256"))
                    for key in ("applied", "already_applied") for item in record.get(key, []) if isinstance(item, dict))
-    wanted = sorted((patch["index"], patch["name"], patch["sha256"]) for patch in (planned or {}).get("patches", []))
-    return built != wanted
+    patches = sorted((patch["index"], patch["name"], patch["sha256"]) for patch in planned["patches"])
+    return built != patches
 
 
 def _state(path):
@@ -542,7 +638,7 @@ def _plain_files(base, tree):
 
 
 def apply(planned, tree, ops, *, guarded, log, work, record=None):
-    """Apply the planned patches inside the new working copy `tree`, before the override patch.
+    """Apply planned patches and PRE_BUILD to the new copy, before the override patch.
 
     Each step is tried first on a throwaway copy of the source root, where GNU
     patch really runs: a dry run would check a second section for the same file
@@ -643,7 +739,65 @@ def apply(planned, tree, ops, *, guarded, log, work, record=None):
         if _state(tree / name) != before[name]:
             culprit = label(touched[name]) if name in touched else "a distribution patch"
             raise LifecycleError(f"{culprit} changes {name}, which the VBIOS override patch reads; not building")
+    if planned.get("pre_build"):
+        _pre_build(planned, tree, base, ops, log, work, record, before)
     return record
+
+
+def _pre_build(planned, tree, base, ops, log, work, record, before):
+    """Run the pinned script on the disposable tree, never the installed package.
+
+    The /etc script override has its own mirrored cwd, as DKMS does. The package
+    script runs at the DKMS source root; only its script and patches directory
+    are supplied by the package, never missing upstream C/header/build source.
+    """
+    script = planned["pre_build"]
+    entry = record["pre_build"]
+    support = script["support_root"]
+    root = planned["root"]
+    if source_tree_hash(support, root) != script["support_sha256"]:
+        raise LifecycleError("DKMS PRE_BUILD support changed before source preparation")
+    if script["override"]:
+        cwd = work / "script-override"
+        shutil.copytree(support, cwd, ignore=shutil.ignore_patterns(".git"))
+        if source_tree_hash(cwd, root) != script["support_sha256"]:
+            raise LifecycleError("DKMS PRE_BUILD override support changed while copying")
+    else:
+        cwd = base
+        # Copy patch data used by package scripts, including /etc's overlay.
+        overlay = root / "etc/dkms/nvidia/patches"
+        if ((source_tree_hash(overlay, root) if _present(overlay) else None)
+                != script["patch_overlay_sha256"]):
+            raise LifecycleError("DKMS PRE_BUILD patch overlay changed before source preparation")
+        for patches in (support / "patches", overlay):
+            if _present(patches):
+                expected = source_tree_hash(patches, root)
+                shutil.copytree(patches, base / "patches", dirs_exist_ok=True, ignore=shutil.ignore_patterns(".git"))
+                if source_tree_hash(patches, root) != expected:
+                    raise LifecycleError("DKMS PRE_BUILD patches changed while copying")
+        destination = cwd / script["name"]
+        checked_path(destination, root, missing=True)
+        if _present(destination) and _trusted_bytes(destination, root, MAX_PATCH, "copied PRE_BUILD") != script["data"]:
+            raise LifecycleError("the selected driver source has a different DKMS PRE_BUILD script")
+        atomic_write(destination, script["data"], script["mode"])
+    path = cwd / script["name"]
+    if _trusted_bytes(path, root, MAX_PATCH, "prepared PRE_BUILD") != script["data"]:
+        raise LifecycleError("DKMS PRE_BUILD script changed while copying")
+    argv = [str(path), *script["arguments"]]
+    entry.update(state="running", cwd=str(cwd), argv=argv, log=str(log), timeout=120)
+    try:
+        result = ops.pre_build(argv, cwd=cwd, log=log, timeout=120)
+        if result:
+            raise LifecycleError(f"DKMS PRE_BUILD failed ({result}); see {log}")
+        _plain_files(tree, tree)
+        source_tree_hash(tree, root)
+        for name, original in before.items():
+            if _state(tree / name) != original:
+                raise LifecycleError(f"DKMS PRE_BUILD changes {name}, which the VBIOS override patch reads")
+        entry["state"] = "complete"
+    except BaseException as exc:
+        entry.update(state="failed", error=str(exc))
+        raise
 
 
 def summary(record):
@@ -656,5 +810,8 @@ def summary(record):
                 for item in record.get(key, []) if isinstance(item, dict)]
     skipped = [(f"PATCH[{item['index']}]: " if item.get("index") is not None else "") + str(item.get("reason"))
                for item in record.get("skipped", []) if isinstance(item, dict)]
-    return {"kernel": record.get("kernel"), "dkms_conf": record.get("dkms_conf"), "applied": names("applied"),
-            "already_applied": names("already_applied"), "skipped": skipped}
+    result = {"kernel": record.get("kernel"), "dkms_conf": record.get("dkms_conf"), "applied": names("applied"),
+              "already_applied": names("already_applied"), "skipped": skipped}
+    if record.get("pre_build"):
+        result["pre_build"] = record["pre_build"]
+    return result

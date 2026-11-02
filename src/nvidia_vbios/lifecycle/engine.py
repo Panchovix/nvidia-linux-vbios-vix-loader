@@ -896,6 +896,10 @@ class Reconciler:
         except (LifecycleError, OSError, ValueError):
             return "unknown"
 
+    def _recover_fallback_locked(self, config, kernel, error):
+        """Portable backends may recover a removed OS kernel after clean rollback."""
+        return None
+
     def _drift_version(self, config):
         """Installed userspace version when it differs from the last READY build, else None."""
         last = self._effective_fleet(config).get("last_ready")
@@ -1065,6 +1069,7 @@ class Reconciler:
         attempt_path = self.state / f"attempt-{kernel}.json"
         owns_lock = False
         package_locks = False
+        default_guarded = False
         profile_disabled = False
         with ExitStack() as locks:
             try:
@@ -1121,6 +1126,7 @@ class Reconciler:
                             rollback_error = str(problem)  # no fail-safe below: the journal needs review
                             raise LifecycleError("the interrupted transaction could not be rolled back") from problem
                 previous = self._guard_default(config, fleet, select)
+                default_guarded = True
                 # Save the prior committed boot pair before a same-kernel update
                 # replaces its fleet slot. Failure only disables this optional cleanup.
                 from .retention import remember
@@ -1170,7 +1176,7 @@ class Reconciler:
                 # The distribution's DKMS build fixes go into the copy before the override patch. The record
                 # fills in as they run, so that a failed attempt still shows them.
                 distribution = json.loads(json.dumps(planned["record"])) if planned else None
-                if planned and planned["patches"]:
+                if planned and (planned["patches"] or planned.get("pre_build")):
                     def before_patch(tree):
                         distribution_patches.apply(
                             planned, tree, self.ops, guarded=list(plan["source_inspection"]["source_hashes"]),
@@ -1204,6 +1210,9 @@ class Reconciler:
                 final_plan = self.plan(kernel)
                 if any(final_plan[key] != plan[key] for key in ("configuration_sha256", "version", "source_inspection", "base_sha256")):
                     raise LifecycleError("enrollment/source/packages/BLS changed during build")
+                final_preparation = distribution_patches.plan(self.root, plan["version"], kernel)
+                if distribution_patches.changed_selection({"distribution_patches": distribution}, final_preparation):
+                    raise LifecycleError("DKMS source preparation inputs changed during build")
                 targets = {self.path(f"/usr/lib/modules/{kernel}/updates/vbios-override/{name}"): data
                            for name, data in modules.items()}
                 for device in config.devices:
@@ -1317,6 +1326,11 @@ class Reconciler:
                         installed = self._drift_version(config)
                         if installed:
                             result = self._fail_safe_locked(config, kernel, installed, exc)
+                            json_write(status_path, result)
+                            json_write(attempt_path, result)
+                            return result
+                        result = self._recover_fallback_locked(config, kernel, exc) if default_guarded else None
+                        if result is not None:
                             json_write(status_path, result)
                             json_write(attempt_path, result)
                             return result

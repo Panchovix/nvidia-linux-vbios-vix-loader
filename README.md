@@ -186,12 +186,28 @@ Run these from a clone of this repository.
    package revision changes them. A `--driver-source` you supplied gets them too, and a patch that is already in it is
    detected and left as it is.
 
-   `dkms.conf` is only read, never run: entries it cannot read without running shell code are skipped and listed under
-   `skipped`, and `reconcile --dry-run` shows what it selects before building. Each patch must apply as DKMS applies
-   it (exactly, or with GNU patch's default fuzz) and must not change a file the override patch reads, or the build
-   stops and says why. Without such a `dkms.conf`, as with the `.run` driver, nothing changes.
-   `sudo nvbios system status` lists them under `distribution_patches` (for a failed build, also under
-   `last_attempt`), and `/var/lib/nvidia-vbios/lifecycle/status-KERNEL.json` keeps each patch's SHA-256.
+   Local overrides for the `nvidia` DKMS module are read after the package configuration, in this order:
+   `/etc/dkms/nvidia.conf`, `nvidia-VERSION.conf`, `nvidia-VERSION-KERNEL.conf`, and
+   `nvidia-VERSION-KERNEL-ARCH.conf` in the same directory. Later assignments replace earlier ones. Patch files in
+   `/etc/dkms/nvidia/patches/` take precedence over the package's patches.
+
+   Configuration is read, never executed. Literal `PATCH`, `PATCH_MATCH` and `PRE_BUILD` directives are supported;
+   source-preparation syntax that needs arbitrary shell evaluation stops the build with an explanation.
+   `reconcile --dry-run` shows the selected inputs without running a script. Each patch must apply as DKMS applies
+   it (exactly, or with GNU patch's default fuzz) and must leave the files read by the override patch unchanged.
+
+   A selected executable `PRE_BUILD` runs after the distribution patches and before the override patch, with the
+   build's privileges, a 120-second timeout and its output in the build log. It runs on disposable copies: package
+   scripts use the copied DKMS source root, while `/etc/dkms/nvidia/` script overrides use a copied support directory.
+   This is not a security sandbox: scripts must be trusted, and hardcoded absolute paths are not redirected. Additional
+   source helpers must already be in the selected driver source. Only literal arguments and the `kernelver`, `arch`
+   and `kernel_source_dir` substitutions are supported. A failing script or an edit to an override anchor blocks
+   publication. Configuration, patch and script changes invalidate cached builds and are checked again after building.
+
+   Without a package `dkms.conf`, as with the `.run` driver, nothing changes. `sudo nvbios system status` lists the
+   preparation under `distribution_patches` (for a failed build, also under `last_attempt`); the per-kernel status
+   keeps the input hashes, and any PRE_BUILD failure names its log. These paths have synthetic tests, not a hardware
+   update test. Other DKMS module names and dynamic configuration are outside this preparation adapter.
 
 5. Reboot. Your normal entry stays in the boot menu. After the reboot, `sudo nvbios system status` compares the
    loaded module and parameters with the prepared ones.
@@ -268,6 +284,16 @@ outside Fedora) or does not know it (`unrecognized arguments`): update it first 
 `sudo nvbios system install --repository "$PWD"`.
 
 ## If something goes wrong
+
+With the `pacman` driver provider, a failed rebuild after a rolling kernel update also checks whether the old
+READY kernel still has its OS module tree. Keeping its private kernel and initramfs does not preserve modules
+removed by the package manager. If that tree is missing or incomplete, the loader selects the new kernel's normal
+entry only after verifying its module inventory, compatible NVIDIA driver and boot image. Status reports `fallback`
+with `VBIOS_BLOCKED`: the override build failed and the next boot uses the normal entry. It does not claim that the
+currently running GPUs changed. A later successful rebuild restores an override entry. Foreign defaults, pending
+one-shot boots, rejected `--select-default` requests and failed rollbacks are preserved. If no normal entry verifies,
+the default is unchanged and the failure explains why; an independently installed fallback kernel is still useful.
+This recovery has synthetic tests only and detects missing indexed modules, not every possible OS corruption.
 
 - Choose your **normal** entry in the boot menu (press Esc or hold Shift while the computer starts); it does not
   load any override. It still uses the modules this tool built, so it does not help after a driver update without

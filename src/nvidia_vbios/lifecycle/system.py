@@ -353,6 +353,10 @@ class SystemOperations:
             raise LifecycleError("the distribution's DKMS build fixes need GNU patch: install the patch package")
         return self._run(["patch", *arguments], log=log, allow_failure=True).returncode
 
+    def pre_build(self, argv, *, cwd, log, timeout):
+        """Pinned DKMS script in an isolated source/support copy; clean logged runner."""
+        return self._run(argv, cwd=cwd, log=log, timeout=timeout).returncode
+
     def inventory(self):
         # NVML/nvidia-smi may fail after a userspace RPM update while the old
         # kernel module is still loaded. Its procfs UUID stays usable and avoids

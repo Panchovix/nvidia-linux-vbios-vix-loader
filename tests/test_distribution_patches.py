@@ -125,6 +125,15 @@ class PatchOperations:
         return run_patch(arguments, log)
 
 
+def isolated_lifecycle_scratch(case):
+    """Give imported fixtures a private REPO boundary owned by the test user."""
+    directory = tempfile.TemporaryDirectory(prefix="dkms-fixtures-", dir="/var/tmp")
+    case.addCleanup(directory.cleanup)
+    scratch = mock.patch.object(lifecycle_fixtures, "REPO", Path(directory.name))
+    scratch.start()
+    case.addCleanup(scratch.stop)
+
+
 class ParseTests(unittest.TestCase):
     def test_ubuntu_dkms_conf_selects_the_kernel_7_fixes_by_index(self):
         parsed = dkms.parse(UBUNTU.encode())
@@ -305,8 +314,7 @@ class RegexTests(unittest.TestCase):
 class PlanTests(unittest.TestCase):
     """Which files are read, and the trust rules for them."""
     def setUp(self):
-        (REPO / ".private").mkdir(exist_ok=True)
-        directory = tempfile.TemporaryDirectory(prefix="distribution-patches-", dir=REPO / ".private")
+        directory = tempfile.TemporaryDirectory(prefix="distribution-patches-", dir="/var/tmp")
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
 
@@ -325,7 +333,8 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(planned["source_root"], "kernel-open")
         self.assertEqual([(patch["index"], patch["name"], patch["match"], patch["sha256"]) for patch in planned["patches"]],
                          [(0, "first.patch", "^7\\.0", digest(PATCHES["first.patch"]))])
-        self.assertEqual(planned["record"], {
+        self.assertEqual({key: planned["record"][key] for key in
+                          ("dkms_conf", "dkms_conf_sha256", "kernel", "source_root", "applied", "already_applied", "skipped")}, {
             "dkms_conf": f"/usr/src/nvidia-{VERSION}/dkms.conf",
             "dkms_conf_sha256": digest((directory / "dkms.conf").read_bytes()), "kernel": "7.0.0-42-generic",
             "source_root": "kernel-open", "applied": [], "already_applied": [], "skipped": []})
@@ -337,11 +346,10 @@ class PlanTests(unittest.TestCase):
         package(self.root, self.conf('PATCH[0]="first.patch"'), files=files)
         self.assertEqual(dkms.plan(self.root, VERSION, "7.0.0")["source_root"], ".")
 
-    def test_unrecognised_package_layout_skips_with_a_reason(self):
+    def test_unrecognised_package_layout_blocks_source_preparation(self):
         package(self.root, self.conf('PATCH[0]="first.patch"'), files={})
-        planned = dkms.plan(self.root, VERSION, "7.0.0")
-        self.assertEqual(planned["patches"], [])
-        self.assertIn("layout", planned["record"]["skipped"][0]["reason"])
+        with self.assertRaisesRegex(LifecycleError, "layout"):
+            dkms.plan(self.root, VERSION, "7.0.0")
 
     def test_patch_names_stay_inside_patches(self):
         for name, message in (("../../etc/shadow", "not a file name inside"), ("sub/../first.patch", "not a file name"),
@@ -402,7 +410,7 @@ class PlanTests(unittest.TestCase):
         self.assertTrue(dkms.changed_selection({"distribution_patches": None}, planned))
         self.assertTrue(dkms.changed_selection({"distribution_patches": built}, None))
         self.assertFalse(dkms.changed_selection({"distribution_patches": None}, None))
-        # Built before the loader applied distribution patches: no record, kept as it is.
+        # Legacy stock-only READY builds keep their existing cache behavior.
         self.assertFalse(dkms.changed_selection({}, planned))
 
 
@@ -410,8 +418,7 @@ class PlanTests(unittest.TestCase):
 class ApplyTests(unittest.TestCase):
     """GNU patch on a copy of a synthetic release tree, as reconcile runs it."""
     def setUp(self):
-        (REPO / ".private").mkdir(exist_ok=True)
-        directory = tempfile.TemporaryDirectory(prefix="distribution-apply-", dir=REPO / ".private")
+        directory = tempfile.TemporaryDirectory(prefix="distribution-apply-", dir="/var/tmp")
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
         self.tree = self.root / "work/source"
@@ -542,6 +549,7 @@ class ReconcileTests(unittest.TestCase):
     MATCH = "'^6\\.19\\.10'"   # NEW only
 
     def setUp(self):
+        isolated_lifecycle_scratch(self)
         self.case = lifecycle_fixtures.LifecycleTests("runTest")
         self.case.setUp()
         self.addCleanup(self.case.doCleanups)
@@ -614,41 +622,34 @@ class ReconcileTests(unittest.TestCase):
         self.assertEqual(self.state(f"attempt-{NEW}.json")["distribution_patches"], status["distribution_patches"])
         self.assertFalse(list((self.root / STATE.lstrip("/") / "transactions").glob("*/source")))
 
-    def test_a_failed_build_still_shows_what_was_applied_and_skipped(self):
+    def test_unknown_preparation_blocks_before_build_without_running_configuration(self):
         package(self.root, 'PATCH[0]="first.patch"\nPATCH[1]="$(echo second.patch)"\n'
                            f"PATCH_MATCH[0]={self.MATCH}\n")
-        self.ops.fault = "build"
-        with self.assertRaisesRegex(LifecycleError, "make failed"):
+        with self.assertRaisesRegex(LifecycleError, "unsupported DKMS source preparation"):
             self.worker.reconcile(NEW)
-        record = self.state(f"status-{NEW}.json")["distribution_patches"]
-        self.assertEqual(([item["name"] for item in record["applied"]], [item["index"] for item in record["skipped"]]),
-                         (["first.patch"], [1]))
-        self.assertEqual(self.state(f"attempt-{NEW}.json")["distribution_patches"], record)
-        status = Bootstrap(self.root, self.ops).status()
-        self.assertEqual(status["distribution_patches"]["applied"], ["first.patch"])
-        self.assertIn("PATCH[1]: dkms.conf line 2: PATCH[1] needs shell expansion", status["distribution_patches"]["skipped"])
-        self.assertEqual(status["last_attempt"]["distribution_patches"], record)
+        self.assertEqual(self.ops.builds, 0)
+        self.assertIn("needs shell expansion", self.state(f"status-{NEW}.json")["error"])
 
     def test_a_ready_kernel_is_rebuilt_only_when_the_selection_changes(self):
         directory = package(self.root, self.conf("first.patch"))
         self.assertEqual(self.worker.reconcile(NEW)["state"], "ready")
         self.assertEqual(self.ops.builds, 1)
-        # A new revision of the package that selects the same patches: the READY build is kept.
+        # Configuration identity changes invalidate READY even with the same selected patches.
         atomic_write(directory / "dkms.conf", ("# revision 2\n" + self.conf("first.patch")).encode(), 0o644)
-        self.assertTrue(self.worker.reconcile(NEW)["state"] == "ready" and self.ops.builds == 1)
+        self.assertTrue(self.worker.reconcile(NEW)["state"] == "ready" and self.ops.builds == 2)
         # One that adds a fix for this kernel: built again, as DKMS does when the package changes.
         atomic_write(directory / "dkms.conf", self.conf("first.patch", "second.patch").encode(), 0o644)
         result = self.worker.reconcile(NEW)
-        self.assertEqual((result["state"], self.ops.builds, self.ops.built[-1]), ("ready", 2, SECOND))
+        self.assertEqual((result["state"], self.ops.builds, self.ops.built[-1]), ("ready", 3, SECOND))
         self.assertEqual([item["name"] for item in self.state(f"status-{NEW}.json")["distribution_patches"]["applied"]],
                          ["first.patch", "second.patch"])
-        self.assertTrue(self.worker.reconcile(NEW)["state"] == "ready" and self.ops.builds == 2)
-        # A READY build from before the loader applied these patches has no record: it is kept as it is.
+        self.assertTrue(self.worker.reconcile(NEW)["state"] == "ready" and self.ops.builds == 3)
+        # Stock-only legacy READY records retain their previous cache behavior.
         status = self.state(f"status-{NEW}.json")
         status.pop("distribution_patches")
         json_write(self.root / STATE.lstrip("/") / f"status-{NEW}.json", status)
         atomic_write(directory / "dkms.conf", self.conf("first.patch").encode(), 0o644)
-        self.assertTrue(self.worker.reconcile(NEW)["state"] == "ready" and self.ops.builds == 2)
+        self.assertTrue(self.worker.reconcile(NEW)["state"] == "ready" and self.ops.builds == 3)
 
     def test_a_pre_patched_registered_source_is_built_as_it_is(self):
         write_files(self.source, {"kernel-open/conftest.sh": SECOND})
@@ -694,6 +695,7 @@ def with_distribution_step(ops):
 class PortableReconcileTests(unittest.TestCase):
     """The Ubuntu path: GRUB, deb packages and PortableReconciler."""
     def test_debian_grub_reconcile_applies_records_and_shows_the_fixes(self):
+        isolated_lifecycle_scratch(self)
         import test_bootstrap_portable as portable_fixtures
         case = portable_fixtures.PortableBootstrapTests("test_fresh_debian_apt_install_enroll_reconcile_enable_disable_resume")
         case.setUp()
@@ -719,6 +721,7 @@ class PortableReconcileTests(unittest.TestCase):
 class AutoSourceTests(unittest.TestCase):
     """After a package driver upgrade the downloaded tag gets the distribution's fixes too."""
     def setUp(self):
+        isolated_lifecycle_scratch(self)
         self.case = fetch_fixtures.AutoSourceTests("test_package_upgrade_registers_the_tag_and_the_next_reconcile_is_ready")
         self.case.setUp()
         self.addCleanup(self.case.doCleanups)
@@ -756,6 +759,220 @@ class SystemPatchTests(unittest.TestCase):
         with mock.patch("nvidia_vbios.lifecycle.system.Path.exists", return_value=False):
             with self.assertRaisesRegex(LifecycleError, "install the patch package"):
                 operations.patch(["-p1"], log=Path("/x/build.log"))
+
+def fixture_pre_build(argv, *, cwd, log, timeout):
+    """Real production runner, with only the synthetic-root trust boundary adapted."""
+    from nvidia_vbios.lifecycle.security import checked_path
+    root = next(parent for parent in reversed(Path(cwd).parents) if parent.name.startswith(("distribution-", "lifecycle-test-")))
+    def trust(path, boundary=Path("/"), **options):
+        return checked_path(path, root if Path(path).is_relative_to(root) else boundary, **options)
+    operations = SystemOperations.__new__(SystemOperations)
+    operations.log = None
+    with mock.patch("nvidia_vbios.lifecycle.system.checked_path", side_effect=trust):
+        return operations.pre_build(argv, cwd=cwd, log=log, timeout=timeout)
+
+
+class PreparationPlanTests(unittest.TestCase):
+    setUp = PlanTests.setUp
+    conf = PlanTests.conf
+
+    def test_all_four_overrides_have_dkms_precedence_and_preserve_array_entries(self):
+        package(self.root, self.conf('PATCH[0]="first.patch"', 'PATCH[1]="header.patch"', "PRE_BUILD=''"))
+        levels = ("nvidia", f"nvidia-{VERSION}", f"nvidia-{VERSION}-7.0.0", f"nvidia-{VERSION}-7.0.0-testarch")
+        for index, name in enumerate(levels):
+            atomic_write(self.root / f"etc/dkms/{name}.conf", self.conf(f"PATCH[0]='level{index}.patch'").encode())
+            atomic_write(self.root / f"etc/dkms/nvidia/patches/level{index}.patch", PATCHES["first.patch"])
+            planned = dkms.plan(self.root, VERSION, "7.0.0", arch="testarch")
+            self.assertEqual([patch["name"] for patch in planned["patches"]], [f"level{index}.patch", "header.patch"])
+            self.assertEqual(len(planned["record"]["configuration_files"]), index + 2)
+        other = dkms.plan(self.root, VERSION, "6.8.0", arch="testarch")
+        self.assertEqual(other["patches"][0]["name"], "level1.patch")
+
+    def test_local_patch_overlay_wins_and_invalidates_legacy_cache(self):
+        package(self.root, "PATCH[0]=first.patch\n")
+        legacy = {"distribution_patches": {"applied": [{"index": 0, "name": "first.patch", "sha256": digest(PATCHES["first.patch"])}]}}
+        original = dkms.plan(self.root, VERSION, "7.0.0")
+        self.assertFalse(dkms.changed_selection(legacy, original))
+        override = self.root / "etc/dkms/nvidia/patches/first.patch"
+        atomic_write(override, PATCHES["fuzzy.patch"])
+        local = dkms.plan(self.root, VERSION, "7.0.0")
+        self.assertEqual(local["patches"][0]["data"], PATCHES["fuzzy.patch"])
+        self.assertTrue(dkms.changed_selection(legacy, local))
+        override.chmod(0o666)
+        with self.assertRaisesRegex(LifecycleError, "untrusted"):
+            dkms.plan(self.root, VERSION, "7.0.0")
+
+    def test_override_trust_and_unknown_preparation_are_fail_closed(self):
+        package(self.root, "PATCH[0]=first.patch\nMAKE[0]=\"make KERNEL=$kernelver EXTRA=$OTHER\"\n")
+        path = self.root / "etc/dkms/nvidia.conf"
+        for conf in ("PRE_BUILD=\"$(touch /never)\"\n", "if true; then\nPRE_BUILD=script.sh\nfi\n",
+                     "PATCH=()\n", "PRE_BUILD='helper.sh; touch /never'\n"):
+            atomic_write(path, conf.encode())
+            with self.subTest(conf=conf), self.assertRaisesRegex(LifecycleError, "unsupported"):
+                dkms.plan(self.root, VERSION, "7.0.0")
+        atomic_write(path, b"# static override\n", 0o666)
+        with self.assertRaisesRegex(LifecycleError, "untrusted"):
+            dkms.plan(self.root, VERSION, "7.0.0")
+        path.chmod(0o644)
+        path.rename(path.with_suffix(".real"))
+        path.symlink_to("nvidia.real")
+        with self.assertRaisesRegex(LifecycleError, "symlink"):
+            dkms.plan(self.root, VERSION, "7.0.0")
+
+    def test_prebuild_arguments_supported_variables_script_trust_and_override_precedence(self):
+        source = package(self.root, 'PRE_BUILD="build.sh $kernelver ${arch} $kernel_source_dir"\n')
+        atomic_write(source / "build.sh", b"#!/bin/sh\nexit 0\n", 0o755)
+        planned = dkms.plan(self.root, VERSION, "7.0.0", arch="testarch")
+        self.assertEqual(planned["pre_build"]["arguments"], ["7.0.0", "testarch", str(self.root / "lib/modules/7.0.0/build")])
+        self.assertFalse(planned["pre_build"]["override"])
+        override = self.root / "etc/dkms/nvidia/build.sh"
+        atomic_write(override, b"#!/bin/sh\nexit 1\n", 0o644)
+        self.assertFalse(dkms.plan(self.root, VERSION, "7.0.0")["pre_build"]["override"])
+        override.chmod(0o755)
+        local = dkms.plan(self.root, VERSION, "7.0.0")
+        self.assertTrue(local["pre_build"]["override"])
+        self.assertEqual(local["pre_build"]["sha256"], digest(override.read_bytes()))
+        override.chmod(0o777)
+        with self.assertRaisesRegex(LifecycleError, "untrusted"):
+            dkms.plan(self.root, VERSION, "7.0.0")
+
+
+@needs_patch
+class PreBuildTests(unittest.TestCase):
+    setUp = ApplyTests.setUp
+
+    def fixture(self, script, *, conf='PRE_BUILD="build.sh 7.0.0"\n', local=None):
+        source = package(self.root, conf)
+        atomic_write(source / "build.sh", script.encode(), 0o755)
+        if local:
+            write_files(self.root / "etc/dkms/nvidia", local)
+        return source, dkms.plan(self.root, VERSION, "7.0.0")
+
+    def execute(self, planned, *, timeout=None):
+        operations = PatchOperations()
+        def pre_build(argv, **options):
+            if timeout is not None:
+                options["timeout"] = timeout
+            return fixture_pre_build(argv, **options)
+        operations.pre_build = pre_build
+        record = json.loads(json.dumps(planned["record"]))
+        self.record = record
+        return dkms.apply(planned, self.tree, operations, guarded=["version.mk", "kernel-open/nvidia/nv.c"],
+                          log=self.log, work=self.work, record=record)
+
+    def test_package_prebuild_runs_after_patches_with_exact_argv_in_copied_root(self):
+        source, planned = self.fixture('#!/bin/sh\nset -eu\ngrep -q "echo five" conftest.sh\n'
+                                       'test "$#" = 1\ntest "$1" = 7.0.0\nprintf prepared > prepared.txt\n',
+                                       conf='PATCH[0]=first.patch\nPRE_BUILD="build.sh $kernelver"\n')
+        original = source_tree_hash(source, self.root)
+        result = self.execute(planned)
+        self.assertEqual((self.tree / "kernel-open/prepared.txt").read_text(), "prepared")
+        self.assertEqual(source_tree_hash(source, self.root), original)
+        self.assertEqual(result["pre_build"]["state"], "complete")
+        self.assertEqual(result["pre_build"]["cwd"], str(self.tree / "kernel-open"))
+        self.assertIn("COMMAND_COMPLETE exit=0", self.log.read_text())
+        self.assertEqual((source / "conftest.sh").read_text(), CONFTEST)
+
+    def test_admin_script_cwd_and_helper_are_mirrored_without_writing_installed_directory(self):
+        source, planned = self.fixture('#!/bin/sh\nexit 99\n', local={
+            "build.sh": '#!/bin/sh\nset -eu\n. ./helper.sh\nprintf "%s:%s" "$message" "$1" > result.txt\n',
+            "helper.sh": 'message=override\n'})
+        override = self.root / "etc/dkms/nvidia"
+        before = source_tree_hash(override, self.root)
+        result = self.execute(planned)
+        self.assertEqual((self.work / "script-override/result.txt").read_text(), "override:7.0.0")
+        self.assertEqual(source_tree_hash(override, self.root), before)
+        self.assertTrue(result["pre_build"]["override"])
+        atomic_write(override / "helper.sh", b"message=changed\n", 0o755)
+        self.assertTrue(dkms.changed_selection({"distribution_patches": result}, dkms.plan(self.root, VERSION, "7.0.0")))
+
+    def test_prebuild_failure_timeout_and_anchor_changes_keep_a_trace(self):
+        for script, expected, timeout in (
+            ('#!/bin/sh\necho deliberate-failure\nexit 17\n', "failed \\(17\\)", None),
+            ('#!/bin/sh\necho timeout-start\nsleep 30\n', "timed out", 0.05),
+            ('#!/bin/sh\nprintf changed > nvidia/nv.c\n', "changes kernel-open/nvidia/nv.c", None)):
+            with self.subTest(expected=expected):
+                (self.tree / "kernel-open/build.sh").unlink(missing_ok=True)
+                source, planned = self.fixture(script)
+                original = (source / "nvidia/nv.c").read_bytes()
+                with self.assertRaisesRegex(LifecycleError, expected):
+                    self.execute(planned, timeout=timeout)
+                self.assertEqual(self.record["pre_build"]["state"], "failed")
+                self.assertEqual((source / "nvidia/nv.c").read_bytes(), original)
+                if timeout:
+                    self.assertIn("COMMAND_FAILED timeout", self.log.read_text())
+
+    def test_prebuild_changes_in_scripts_helpers_or_patch_overlay_invalidate_identity(self):
+        source, planned = self.fixture('#!/bin/sh\nexit 0\n')
+        atomic_write(source / "helper.sh", b"#!/bin/sh\nexit 0\n", 0o755)
+        with self.assertRaisesRegex(LifecycleError, "support changed"):
+            self.execute(planned)
+        current = dkms.plan(self.root, VERSION, "7.0.0")
+        self.assertNotEqual(planned["record"]["preparation_sha256"], current["record"]["preparation_sha256"])
+        atomic_write(self.root / "etc/dkms/nvidia/patches/unselected.patch", b"unselected helper input\n")
+        updated = dkms.plan(self.root, VERSION, "7.0.0")
+        self.assertNotEqual(current["record"]["preparation_sha256"], updated["record"]["preparation_sha256"])
+
+    def test_missing_upstream_source_is_never_filled_from_package_and_changed_local_script_blocks(self):
+        source, planned = self.fixture('#!/bin/sh\ntest ! -e common/inc/should-not-exist.h\n')
+        atomic_write(source / "common/inc/should-not-exist.h", b"package-only source\n")
+        planned = dkms.plan(self.root, VERSION, "7.0.0")
+        self.execute(planned)
+        self.assertFalse((self.tree / "kernel-open/common/inc/should-not-exist.h").exists())
+        atomic_write(self.tree / "kernel-open/build.sh", b"#!/bin/sh\nexit 88\n", 0o755)
+        with self.assertRaisesRegex(LifecycleError, "different DKMS PRE_BUILD"):
+            self.execute(planned)
+
+
+class PreBuildReconcileTests(unittest.TestCase):
+    register = ReconcileTests.register
+    state = ReconcileTests.state
+
+    def setUp(self):
+        ReconcileTests.setUp(self)
+        self.ops.pre_build = fixture_pre_build
+
+    def add_script(self, body='printf prepared > prepared.txt\n'):
+        directory = package(self.root, 'PRE_BUILD="build.sh $kernelver"\n')
+        atomic_write(directory / "build.sh", ('#!/bin/sh\nset -eu\n' + body).encode(), 0o755)
+        return directory
+
+    def test_script_only_reconcile_prepares_before_build_and_invalidates_cache_on_helper_change(self):
+        directory = self.add_script()
+        result = self.worker.reconcile(NEW)
+        self.assertEqual(result["distribution_patches"]["pre_build"]["state"], "complete")
+        self.assertEqual((self.ops.hooks, self.ops.builds), ([True], 1))
+        self.worker.reconcile(NEW)
+        self.assertEqual(self.ops.builds, 1)
+        atomic_write(directory / "helper.sh", b"#!/bin/sh\nexit 0\n", 0o755)
+        self.worker.reconcile(NEW)
+        self.assertEqual(self.ops.builds, 2)
+
+    def test_prebuild_failure_blocks_before_compile_and_records_script_error(self):
+        self.add_script('echo failed-setup\nexit 19\n')
+        with self.assertRaisesRegex(LifecycleError, "failed \\(19\\)"):
+            self.worker.reconcile(NEW)
+        self.assertEqual(self.ops.builds, 0)
+        status = self.state(f"status-{NEW}.json")
+        self.assertEqual(status["distribution_patches"]["pre_build"]["state"], "failed")
+        self.assertIn("failed-setup", Path(status["distribution_patches"]["pre_build"]["log"]).read_text())
+        self.assertEqual(self.ops.environment["saved_entry"], "normal-" + OLD)
+
+    def test_preparation_inputs_are_revalidated_after_build_before_publication(self):
+        for input_kind in ("configuration", "helper"):
+            with self.subTest(input_kind=input_kind):
+                directory = self.add_script()
+                original_build = self.ops.build
+                def mutate(*args, **kwargs):
+                    original_build(*args, **kwargs)
+                    target = directory / ("dkms.conf" if input_kind == "configuration" else "helper.sh")
+                    atomic_write(target, b"# changed during build\n", 0o755)
+                with mock.patch.object(self.ops, "build", side_effect=mutate):
+                    with self.assertRaisesRegex(LifecycleError, "DKMS source preparation inputs changed during build"):
+                        self.worker.reconcile(NEW)
+                self.assertEqual(self.ops.environment["saved_entry"], "normal-" + OLD)
+                self.assertFalse((self.root / f"usr/lib/modules/{NEW}/updates/vbios-override/nvidia.ko").exists())
+
 
 
 if __name__ == "__main__":

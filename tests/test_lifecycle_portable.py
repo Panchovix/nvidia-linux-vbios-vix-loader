@@ -7,6 +7,7 @@ import copy
 import json
 from pathlib import Path
 import re
+import shutil
 import struct
 import sys
 import tempfile
@@ -403,6 +404,175 @@ class PortableLifecycleTests(unittest.TestCase):
             self.worker.reconcile(self.new)
         self.assertEqual(self.ops.environment['saved_entry'], self.config['fallback_entry'])
         self.assertFalse((self.root / f'usr/lib/modules/{self.new}/updates/vbios-override').exists())
+
+    def rolling_replacement(self, *, remove_old=True):
+        self.setup_profile('systemd-boot', rolling=True)
+        self.os_module_inventory(self.old)
+        ready = self.worker.reconcile(self.old)
+        self.add_kernel(self.new)
+        self.os_module_inventory(self.new)
+        stock = self.root / f'usr/lib/modules/{self.new}/extra/nvidia.ko'
+        atomic_write(stock, json.dumps({'version': VERSION, 'vermagic': self.new + ' SMP'}).encode())
+        if remove_old:
+            shutil.rmtree(self.root / f'usr/lib/modules/{self.old}')
+        return ready
+
+    def os_module_inventory(self, kernel):
+        self.write(f'/usr/lib/modules/{kernel}/kernel/drivers/synthetic.ko', b'OS MODULE')
+        self.write(f'/usr/lib/modules/{kernel}/modules.dep', b'kernel/drivers/synthetic.ko:\n')
+
+    def test_arch_removed_kernel_build_failure_selects_valid_normal_and_retry_commits(self):
+        ready = self.rolling_replacement()
+        boot_files = {item['path']: self.root.joinpath(item['path'].lstrip('/')).read_bytes()
+                      for item in self.fleet()['last_ready']['boot_files']}
+        self.ops.fault = 'build'
+        result = self.worker.reconcile(self.new)
+        self.assertEqual((result['state'], result['entry'], result['next_boot_override']),
+                         ('fallback', 'cachyos.conf', False))
+        self.assertFalse(result['previous_ready_complete'])
+        self.assertEqual(self.fleet()['last_ready']['entry'], ready['entry'])
+        self.assertEqual(self.fleet()['boot_recovery']['phase'], 'selected')
+        self.assertEqual({name: self.root.joinpath(name.lstrip('/')).read_bytes() for name in boot_files}, boot_files)
+        # A timer retry keeps normal K2 and never reselects the incomplete K1.
+        self.ops.events.clear()
+        self.assertEqual(self.worker.reconcile(self.new)['state'], 'fallback')
+        self.assertNotIn('default:' + ready['entry'], self.ops.events)
+        self.ops.fault = None
+        result = self.worker.reconcile(self.new)
+        self.assertEqual(result['state'], 'ready')
+        self.assertNotIn('boot_recovery', self.fleet())
+        self.assertEqual(self.ops.environment['saved_entry'], result['entry'])
+
+    def test_arch_recovery_selection_intent_survives_interruption(self):
+        from unittest.mock import patch
+        self.rolling_replacement()
+        self.ops.fault = 'build'
+        original = self.ops.set_default
+        def interrupt(entry):
+            original(entry)
+            raise LifecycleError('synthetic interruption after selecting normal')
+        with patch.object(self.ops, 'set_default', side_effect=interrupt):
+            with self.assertRaisesRegex(LifecycleError, 'synthetic interruption'):
+                self.worker.reconcile(self.new)
+        self.assertEqual(self.ops.environment['saved_entry'], 'cachyos.conf')
+        self.assertEqual(self.fleet()['boot_recovery']['phase'], 'selecting')
+        self.ops.fault = None
+        self.assertEqual(self.worker.reconcile(self.new)['state'], 'ready')
+        self.assertNotIn('boot_recovery', self.fleet())
+
+    def test_arch_recovery_guard_rejects_changed_normal_and_foreign_or_pending_default(self):
+        for fault in ('normal-changed', 'foreign', 'pending'):
+            with self.subTest(fault=fault):
+                self.setUp()
+                self.rolling_replacement()
+                self.ops.fault = 'build'
+                self.worker.reconcile(self.new)
+                if fault == 'normal-changed':
+                    self.write('/efi/initramfs-linux-cachyos.img', b'UNREVIEWED CHANGE')
+                elif fault == 'foreign':
+                    self.ops.environment['saved_entry'] = 'foreign.conf'
+                else:
+                    self.ops.environment['next_entry'] = 'foreign.conf'
+                environment = dict(self.ops.environment)
+                self.ops.events.clear()
+                self.ops.fault = None
+                with self.assertRaises(LifecycleError):
+                    self.worker.reconcile(self.new)
+                self.assertEqual(self.ops.environment, environment)
+                self.assertFalse(any(event.startswith('default:') for event in self.ops.events))
+
+    def test_arch_complete_ready_kernel_remains_default_after_build_failure(self):
+        ready = self.rolling_replacement(remove_old=False)
+        self.ops.fault = 'build'
+        with self.assertRaisesRegex(LifecycleError, 'make failed'):
+            self.worker.reconcile(self.new)
+        self.assertEqual(self.ops.environment['saved_entry'], ready['entry'])
+        self.assertNotIn('boot_recovery', self.fleet())
+
+    def test_arch_empty_or_updates_only_old_tree_is_not_a_complete_fallback(self):
+        for inventory in (b'', b'updates/vbios-override/nvidia.ko:\n'):
+            with self.subTest(inventory=inventory):
+                self.setUp()
+                self.rolling_replacement()
+                self.write(f'/usr/lib/modules/{self.old}/modules.dep', inventory)
+                self.ops.fault = 'build'
+                self.assertEqual(self.worker.reconcile(self.new)['state'], 'fallback')
+
+    def test_arch_recovery_rejects_incompatible_or_unknown_normal(self):
+        from unittest.mock import patch
+        for fault in ('version', 'vermagic', 'mismatched', 'unknown', 'contains-override', 'os-module', 'normal-missing'):
+            with self.subTest(fault=fault):
+                self.setUp()
+                ready = self.rolling_replacement()
+                self.ops.fault = 'build'
+                stock = self.root / f'usr/lib/modules/{self.new}/extra/nvidia.ko'
+                if fault in ('version', 'vermagic'):
+                    metadata = self.ops.modinfo(stock)
+                    metadata[fault] = 'wrong'
+                    atomic_write(stock, json.dumps(metadata).encode())
+                if fault == 'normal-missing':
+                    (self.root / 'efi/loader/entries/cachyos.conf').unlink()
+                if fault == 'os-module':
+                    (self.root / f'usr/lib/modules/{self.new}/kernel/drivers/synthetic.ko').unlink()
+                image_state = fault if fault in ('mismatched', 'unknown', 'contains-override') else 'clean'
+                with patch.object(self.worker, '_normal_image_state', return_value=image_state):
+                    with self.assertRaisesRegex(LifecycleError, 'fail-safe:'):
+                        self.worker.reconcile(self.new)
+                self.assertEqual(self.ops.environment['saved_entry'], ready['entry'])
+                self.assertNotIn('boot_recovery', self.fleet())
+
+    def test_arch_recovery_preserves_foreign_default_and_pending_transition(self):
+        for environment in ({'saved_entry': 'foreign.conf'}, {'next_entry': 'foreign.conf'},
+                            {'prev_saved_entry': 'foreign.conf'}):
+            with self.subTest(environment=environment):
+                self.setUp()
+                ready = self.rolling_replacement()
+                def fail_build(*args, **kwargs):
+                    self.ops.environment.update(environment)
+                    raise LifecycleError('synthetic build failure')
+                self.ops.build = fail_build
+                with self.assertRaisesRegex(LifecycleError, 'synthetic build failure'):
+                    self.worker.reconcile(self.new)
+                self.assertEqual(self.ops.environment, dict({'saved_entry': ready['entry']}, **environment))
+                self.assertNotIn('boot_recovery', self.fleet())
+
+    def test_arch_selection_flag_rejects_a_rolling_normal_of_another_kernel(self):
+        self.rolling_replacement()
+        self.add_kernel('6.12.11-1-cachyos')
+        self.ops.environment = {'saved_entry': 'cachyos.conf'}
+        self.ops.events.clear()
+        for select in (False, True):
+            with self.subTest(select_default=select), self.assertRaises(LifecycleError):
+                self.worker.reconcile(self.new, select_default=select)
+            self.assertEqual(self.ops.environment, {'saved_entry': 'cachyos.conf'})
+            self.assertNotIn('boot_recovery', self.fleet())
+        self.assertFalse(any(event.startswith('default:') for event in self.ops.events))
+
+    def test_arch_rejected_default_guard_never_triggers_fallback_selection(self):
+        from unittest.mock import patch
+        ready = self.rolling_replacement()
+        self.ops.events.clear()
+        # Simulate a refusal after package locks were acquired (or after an
+        # interrupted journal was rolled back), including --select-default.
+        with patch.object(self.worker, '_guard_default', side_effect=[ready['entry'],
+                          LifecycleError('select-default rejected; boot default preserved')]):
+            with self.assertRaisesRegex(LifecycleError, 'select-default rejected'):
+                self.worker.reconcile(self.new, select_default=True)
+        self.assertEqual(self.ops.environment['saved_entry'], ready['entry'])
+        self.assertNotIn('boot_recovery', self.fleet())
+        self.assertFalse(any(event.startswith('default:') for event in self.ops.events))
+
+    def test_arch_recovery_never_runs_after_failed_rollback(self):
+        from unittest.mock import patch
+        ready = self.rolling_replacement()
+        def fail_image():
+            raise LifecycleError('synthetic image failure')
+        self.ops.after_initramfs = fail_image
+        with patch.object(self.worker, '_rollback', side_effect=LifecycleError('synthetic rollback failure')):
+            with self.assertRaisesRegex(LifecycleError, 'rollback requires review'):
+                self.worker.reconcile(self.new)
+        self.assertEqual(self.ops.environment['saved_entry'], ready['entry'])
+        self.assertNotIn('boot_recovery', self.fleet())
 
     def test_arch_rolling_stock_kernel_overwrite_preserves_old_managed_kernel_and_image(self):
         self.setup_profile('systemd-boot', rolling=True)
