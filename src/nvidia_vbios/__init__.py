@@ -1,2 +1,2 @@
 """Per-GPU NVIDIA VBIOS override loader for Linux."""
-__version__ = "0.1.3"
+__version__ = "0.1.4"

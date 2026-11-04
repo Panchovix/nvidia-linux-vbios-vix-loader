@@ -11,6 +11,12 @@ Funciona con los drivers NVIDIA 615.x (R615). Podría dejar de funcionar en un d
 cambiar o quitar el reemplazo, así que después de cada actualización del driver revisa `nvbios system status` y
 un valor editado (por ejemplo los límites de potencia en `nvidia-smi -q -d POWER`).
 
+**Driver 620.** NVIDIA publicó el 620.70.06, pero todavía no publica su código de open-gpu-kernel-modules, así que
+el loader no puede compilar el reemplazo para esa versión. Si lo instalas, el loader arranca una entrada normal sin el
+reemplazo (ver [Actualizaciones del kernel y del driver](#actualizaciones-del-kernel-y-del-driver)), y con un build
+P2P además necesitarías un port P2P de la 620. El soporte llega en una actualización posterior del loader, cuando
+NVIDIA publique el código.
+
 Gracias a **@pantsoftime** ([overclock.net](https://www.overclock.net)): este proyecto se basa en su parche
 original `vbios_override`, y sin él nada de esto habría sido posible.
 
@@ -294,6 +300,30 @@ ese caso primero reinicia, para que `uname -r` sea ese kernel; el error indica q
 anterior a esta versión rechaza la opción (`only reviewed for Fedora BLS entries` fuera de Fedora) o no la conoce
 (`unrecognized arguments`): primero actualízalo desde este checkout con
 `sudo nvbios system install --repository "$PWD"`.
+
+## Workaround de pantalla negra de las RTX 50
+
+En algunas placas RTX 50 (GB202 a GB207, según una lista que trae el driver) NVIDIA baja 50 mV el límite de voltaje
+MSVDD como workaround para pantallas negras. El loader permite configurarlo por GPU. `off` desactiva el workaround,
+`on` lo aplica incluso en placas fuera de la lista de NVIDIA y `default` vuelve al comportamiento de NVIDIA.
+
+```sh
+sudo nvbios system black-screen-fix show
+sudo nvbios system black-screen-fix set --device 0000:03:00.0 off
+sudo nvbios system black-screen-fix set --device 0000:03:00.0 default
+```
+
+`show` lista las GPUs que cambiaste. Funciona con GPUs RTX 50 inscritas (`enroll`) y con las recompilaciones
+automáticas activadas, elegidas por PCI (`sudo nvbios system devices` las lista), y `--dry-run` muestra el cambio sin
+hacerlo. No se envía nada a la GPU en el momento. El servicio de recompilación arma una nueva imagen de arranque y el
+ajuste se aplica en el siguiente arranque. Las versiones instaladas anteriores no tienen el comando, así que primero
+actualiza el loader instalado (ver [Actualizar una instalación existente del
+loader](#actualizar-una-instalación-existente-del-loader)).
+
+Probado en una RTX 5090, 5080 y 5070 Ti, donde con `off` el offset del límite MSVDD marca 0 mV en vez de -50 mV.
+Es el workaround del propio NVIDIA, así que desactivarlo podría traer de vuelta en tu tarjeta las pantallas negras
+que busca evitar. Cambiarlo es decisión tuya. Si la pantalla se pone negra después de desactivarlo, vuelve a
+`default`.
 
 ## Si algo sale mal
 

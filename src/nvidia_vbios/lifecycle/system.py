@@ -187,27 +187,13 @@ class SystemOperations:
                 versions.add(match[1])
             if len(versions) != 1:
                 raise LifecycleError("manual NVIDIA userspace libraries have mixed full versions")
-            with path.open("rb") as stream:
-                magic = stream.read(4)
-            if path.name != "nvidia-smi" or magic != b"\x7fELF" or not os.access(path, os.X_OK):
+            data = path.read_bytes()
+            if path.name != "nvidia-smi" or data[:4] != b"\x7fELF" or not os.access(path, os.X_OK):
                 raise LifecycleError("manual nvidia-smi must be a trusted executable ELF file")
-            response = self._run([path, "--version"], allow_failure=True)
-            version_output = response.stdout.decode()
-            smi_versions = re.findall(r"^\s*NVIDIA-SMI(?:\s+version)?\s*:\s*(\d+\.\d+\.\d+)\s*$", version_output, re.M | re.I)
-            own_version_lines = [line for line in (version_output + "\n" + response.stderr.decode()).splitlines()
-                                 if re.match(r"\s*NVIDIA-SMI", line, re.I)]
-            if len(own_version_lines) > 1:
-                smi_versions = []
-            if response.returncode and not own_version_lines:
-                # Some releases initialize NVML before printing --version and
-                # stop on the expected old-KMD/new-userspace mismatch. --help
-                # identifies this trusted executable without requiring NVML.
-                # Never replace an explicit conflicting/partial version report.
-                help_response = self._run([path, "--help"], allow_failure=True)
-                lines = [line.strip() for line in help_response.stdout.decode().splitlines() if line.strip()]
-                headers = [line for line in lines if re.match(r"NVIDIA\s+System\s+Management\s+Interface\b", line, re.I)]
-                match = re.fullmatch(r"NVIDIA System Management Interface -- v(\d+\.\d+\.\d+)", headers[0]) if len(headers) == 1 else None
-                smi_versions = ([match[1]] if help_response.returncode == 0 and match and lines[0] == headers[0] else [])
+            # Read the release string the binary embeds instead of running it: even
+            # --version initializes NVML and reaches every GPU, which the periodic
+            # reconcile must never do on a busy host. A release embeds exactly one.
+            smi_versions = sorted({found.decode() for found in re.findall(rb"(?<=\x00)\d{3,}\.\d+\.\d+(?=\x00)", data)})
             if len(smi_versions) != 1 or smi_versions[0] not in versions:
                 raise LifecycleError("manual nvidia-smi and installed libraries do not identify one full matching version")
             return smi_versions[0]

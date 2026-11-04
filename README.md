@@ -11,6 +11,11 @@ Works with NVIDIA 615.x (R615) drivers. It may stop working in a future driver i
 remove the override, so after every driver update run `nvbios system status` and check an edited value (for
 example the power limits in `nvidia-smi -q -d POWER`).
 
+**Driver 620.** NVIDIA released 620.70.06 but has not published its open-gpu-kernel-modules source yet, so the
+loader cannot build the override for it. If you install it, the loader boots a normal entry without the override
+(see [Kernel and driver updates](#kernel-and-driver-updates)), and with a P2P build you would also need a P2P port of
+620. Support comes in a later loader update, once NVIDIA publishes the source.
+
 Thanks to **@pantsoftime** ([overclock.net](https://www.overclock.net)), whose original `vbios_override` patch
 this project is built on. Without it, none of this would have been possible.
 
@@ -282,6 +287,28 @@ UKI that the kernel package rewrites): then reboot first, so that `uname -r` is 
 kernel to use. An installed runtime older than this version refuses the flag (`only reviewed for Fedora BLS entries`
 outside Fedora) or does not know it (`unrecognized arguments`): update it first from this checkout with
 `sudo nvbios system install --repository "$PWD"`.
+
+## RTX 50 black-screen workaround
+
+On some RTX 50 boards (GB202 to GB207, from a list built into the driver) NVIDIA lowers the MSVDD voltage limit by
+50 mV as a workaround for black screens. The loader can set this per GPU. `off` turns the workaround off, `on`
+applies it even on boards outside NVIDIA's list, and `default` goes back to NVIDIA's own behaviour.
+
+```sh
+sudo nvbios system black-screen-fix show
+sudo nvbios system black-screen-fix set --device 0000:03:00.0 off
+sudo nvbios system black-screen-fix set --device 0000:03:00.0 default
+```
+
+`show` lists the GPUs you changed. It works for enrolled RTX 50 GPUs with automatic rebuilds turned on, selected by
+PCI address (`sudo nvbios system devices` lists them), and `--dry-run` shows the change without making it. Nothing is
+sent to the GPU right away. The rebuild service makes a new boot image and the setting applies at the next boot. Older
+installed versions do not have the command, so update the installed loader first (see [Updating an existing loader
+installation](#updating-an-existing-loader-installation)).
+
+Tested on an RTX 5090, 5080 and 5070 Ti, where with `off` the MSVDD limit offset reads 0 mV instead of -50 mV. This
+is NVIDIA's own workaround, so turning it off could bring back the black screens it is meant to prevent on your card.
+Whether to change it is your decision. If the display goes black after turning it off, set `default` again.
 
 ## If something goes wrong
 

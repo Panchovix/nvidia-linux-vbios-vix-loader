@@ -24,7 +24,6 @@ class ManualProviderTests(unittest.TestCase):
         self.operations.filesystem_root = self.root
         self.operations.log = None
         self.version = "615.78.08"
-        self.smi_version = self.version
         self.packages = ""
         self.owned = set()
         self.repo_files = ["/var/nvidia-driver-local-repo-fedora41-570.158.01",
@@ -33,10 +32,15 @@ class ManualProviderTests(unittest.TestCase):
         self.provider = {"provider": "manual", "nvidia_smi": "/usr/bin/nvidia-smi",
                          "libraries": ["/usr/lib64/libnvidia-ml.so.1", "/usr/lib64/libcuda.so.1"]}
         self.config = {"userspace": self.provider}
-        atomic_write(self.root / "usr/bin/nvidia-smi", b"\x7fELFtrusted-smi", 0o755)
+        self.write_smi(self.version)
         self.library("libnvidia-ml", self.version)
         self.library("libcuda", self.version)
         self.operations._run = MagicMock(side_effect=self.command)
+
+    def write_smi(self, *versions):
+        # Releases embed one NUL-terminated release string next to unrelated short versions.
+        body = b"\x7fELFtrusted-smi\x001.2.13\x002.9.2\x00" + b"".join(v.encode() + b"\x00" for v in versions)
+        atomic_write(self.root / "usr/bin/nvidia-smi", body, 0o755)
 
     def library(self, stem, version):
         directory = self.root / "usr/lib64"
@@ -56,77 +60,24 @@ class ManualProviderTests(unittest.TestCase):
             owned = str(command[-1]) in self.owned
             return subprocess.CompletedProcess(command, 0 if owned else 1,
                 stdout=(self.version + "\n").encode() if owned else b"not owned", stderr=b"")
-        if str(command[0]).endswith("/nvidia-smi") and command[1:] == ["--version"]:
-            text = (f"NVIDIA-SMI version  : {self.smi_version}\nNVML version       : 615.78\n"
-                    "KMD version        : 615.71.09\n")
-            return subprocess.CompletedProcess(command, 0, stdout=text.encode(), stderr=b"")
         raise AssertionError(f"unexpected production operation: {command}")
 
     def test_manual_installed_version_ignores_still_loaded_old_kmd(self):
         self.assertEqual(self.operations.installed_version(self.config), "615.78.08")
 
-    def test_real_nvml_mismatch_uses_exact_help_version_without_kmd_inference(self):
-        original=self.command
-        def mismatch(command, **kwargs):
-            if str(command[0]).endswith('/nvidia-smi'):
-                if command[1:]==['--version']:
-                    return subprocess.CompletedProcess(command,18,stdout=b'Failed to initialize NVML: Driver/library version mismatch\nNVML library version: 615.78\n',stderr=b'')
-                if command[1:]==['--help']:
-                    return subprocess.CompletedProcess(command,0,stdout=b'NVIDIA System Management Interface -- v615.78.08\n\nUsage details\n',stderr=b'')
-            return original(command,**kwargs)
-        self.operations._run.side_effect=mismatch
-        self.assertEqual(self.operations.installed_version(self.config),'615.78.08')
+    def test_manual_version_is_read_from_the_binary_without_running_it(self):
+        self.assertEqual(self.operations.installed_version(self.config), "615.78.08")
+        self.assertFalse([call for call in self.operations._run.call_args_list
+                          if str(call.args[0][0]).endswith("nvidia-smi")])
 
-    def test_help_fallback_rejects_partial_conflicting_duplicate_or_failed_headers(self):
-        original=self.command
-        responses=[(0,b'NVIDIA System Management Interface -- v615.78\n'),
-                   (0,b'NVIDIA System Management Interface -- v615.71.09\n'),
-                   (0,b'NVIDIA System Management Interface -- v615.78.08\nNVIDIA System Management Interface -- v615.78.08\n'),
-                   (0,b'NVIDIA System Management Interface -- v615.78.08\nNVIDIA System Management Interface -- v615.78\n'),
-                   (0,b'Error before help\nNVIDIA System Management Interface -- v615.78.08\n'),
-                   (1,b'NVIDIA System Management Interface -- v615.78.08\n'),
-                   (0,b'')]
-        for rc,output in responses:
-            def mismatch(command, **kwargs):
-                if str(command[0]).endswith('/nvidia-smi'):
-                    if command[1:]==['--version']:
-                        return subprocess.CompletedProcess(command,18,stdout=b'Failed to initialize NVML: Driver/library version mismatch\nNVML library version: 615.78\n',stderr=b'')
-                    if command[1:]==['--help']:
-                        return subprocess.CompletedProcess(command,rc,stdout=output,stderr=b'')
-                return original(command,**kwargs)
-            self.operations._run.side_effect=mismatch
-            with self.subTest(rc=rc,output=output),self.assertRaisesRegex(LifecycleError,'full matching version'):
+    def test_embedded_release_string_must_be_one_full_match(self):
+        for versions in (("615.71.09",), ("615.78",), (), ("615.78.08", "615.71.09")):
+            self.write_smi(*versions)
+            with self.subTest(versions=versions), self.assertRaisesRegex(LifecycleError, "full matching version"):
                 self.operations.installed_version(self.config)
-
-    def test_failed_explicit_version_report_cannot_be_overridden_by_help(self):
-        original=self.command
-        for version in ('615.71.09','615.78'):
-            def reported(command, **kwargs):
-                if str(command[0]).endswith('/nvidia-smi'):
-                    self.assertEqual(command[1:],['--version'],'must not conceal explicit version with help')
-                    return subprocess.CompletedProcess(command,18,stdout=('NVIDIA-SMI version: '+version+'\n').encode(),stderr=b'')
-                return original(command,**kwargs)
-            self.operations._run.side_effect=reported
-            with self.subTest(version=version),self.assertRaisesRegex(LifecycleError,'full matching version'):
-                self.operations.installed_version(self.config)
-
-    def test_missing_or_malformed_primary_report_does_not_hide_behind_help(self):
-        original=self.command
-        cases=[(0,b'NVML version: 615.78\n',b''),
-               (18,b'NVIDIA-SMI version = 615.78.08\n',b''),
-               (18,b'NVIDIA-SMI unknown format\n',b''),
-               (18,b'',b'nvidia-smi malformed own version\n'),
-               (18,b'NVIDIA-SMI version: 615.78.08\nNVIDIA-SMI version: 615.78\n',b''),
-               (0,b'NVIDIA-SMI version: 615.78.08\nNVIDIA-SMI version: 615.78.08\n',b'')]
-        for rc,out,err in cases:
-            def primary(command, **kwargs):
-                if str(command[0]).endswith('/nvidia-smi'):
-                    self.assertEqual(command[1:],['--version'],'no fallback permitted')
-                    return subprocess.CompletedProcess(command,rc,stdout=out,stderr=err)
-                return original(command,**kwargs)
-            self.operations._run.side_effect=primary
-            with self.subTest(rc=rc,out=out,err=err),self.assertRaisesRegex(LifecycleError,'full matching version'):
-                self.operations.installed_version(self.config)
+        atomic_write(self.root / "usr/bin/nvidia-smi", b"\x7fELFtrusted-smi v615.78.08\x00", 0o755)
+        with self.assertRaisesRegex(LifecycleError, "full matching version"):
+            self.operations.installed_version(self.config)
 
     def test_local_repository_metadata_is_not_installed_driver_userspace(self):
         self.packages = "nvidia-driver-local-repo-fedora41-570.158.01 1.0\n"
@@ -271,7 +222,7 @@ class ManualProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(LifecycleError, "mixed full versions"):
             self.operations.installed_version(self.config)
         self.library("libcuda", self.version)
-        self.smi_version = "615.71.09"
+        self.write_smi("615.71.09")
         with self.assertRaisesRegex(LifecycleError, "full matching version"):
             self.operations.installed_version(self.config)
 
@@ -280,7 +231,7 @@ class ManualProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(LifecycleError, "full versioned ELF"):
             self.operations.installed_version(self.config)
         self.library("libnvidia-ml", self.version)
-        self.smi_version = "615.78"
+        self.write_smi("615.78")
         with self.assertRaisesRegex(LifecycleError, "full matching version"):
             self.operations.installed_version(self.config)
 
