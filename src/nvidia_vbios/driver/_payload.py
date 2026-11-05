@@ -543,3 +543,17 @@ typedef struct NV_ABI_STABLE GSP_ARGUMENTS_CACHED
     // Other data can be added here, so long as the whole structure is <=4kb
     //
 } GSP_ARGUMENTS_CACHED;'''
+
+# 620 appends the context-switch dump buffer after vbiosOverrideArgs. The
+# override stays at +0xa8, where the 620 GSP firmware still reads it.
+_VBIOS_OVERRIDE_ARGS_END = '    } vbiosOverrideArgs;\n'
+CACHED_ARGUMENTS_ABIS = (
+    CACHED_ARGUMENTS_ABI,
+    CACHED_ARGUMENTS_ABI.replace(_VBIOS_OVERRIDE_ARGS_END, _VBIOS_OVERRIDE_ARGS_END + '''
+    struct
+    {
+        NvU64                         radix3;
+        NvU64                         size;
+    } ctxswDumpArgs;
+''', 1),
+)

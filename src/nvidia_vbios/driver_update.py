@@ -42,6 +42,12 @@ class DriverUpdate(Bootstrap):
             value = {'schema_version': 1, 'version': version, 'state': state, 'finished': time.time(), **extra}
             json_write(self.path(FETCH_RECORD), value)
             return value
+        def installed_release():
+            # Read only where a refusal is compared or stamped; an unreadable file counts as unknown.
+            try:
+                return self._read(BASE + '/installed.json').get('release')
+            except (LifecycleError, AttributeError):
+                return None
         # Every skip below happens without network access.
         if not raw['enabled'] or not raw.get('auto_source'):
             return record('off', reason='automatic source download is off for this enrollment')
@@ -54,7 +60,10 @@ class DriverUpdate(Bootstrap):
         if any(s['version'] == version for s in config.sources):
             return {'schema_version': 1, 'version': version, 'state': 'present'}
         if previous.get('version') == version:
-            if previous.get('state') in ('rejected', 'rolled-back'):
+            # A rollback stays. A refused tag stays refused only for the loader release that refused it: a newer
+            # loader may support it, and a record written before releases were kept is tried once more.
+            if previous.get('state') == 'rolled-back' or (
+                    previous.get('state') == 'rejected' and 'release' in previous and previous['release'] == installed_release()):
                 return previous
             transaction = previous.get('transaction_id')
             if (previous.get('state') == 'registered' and isinstance(transaction, str) and self._read(
@@ -84,7 +93,7 @@ class DriverUpdate(Bootstrap):
             publication, entry = self._register_source_locked(config, tree, info, version, False, 'auto-source', origin=origin)
             return record('registered', transaction_id=publication['transaction_id'], snapshot=entry['path'], **origin)
         except source_fetch.Rejected as exc:
-            return record('rejected', error=str(exc), **origin)
+            return record('rejected', error=str(exc), release=installed_release(), **origin)
         except (LifecycleError, OSError) as exc:
             return record('failed', error=str(exc), **origin)
         finally:

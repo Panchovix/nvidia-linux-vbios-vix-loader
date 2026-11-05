@@ -9,7 +9,7 @@ import shutil
 import tempfile
 import time
 from ..limits import REGISTRY_STRING_MAX_BYTES
-from . import distribution_patches
+from . import distribution_patches, vfe_layouts
 from .config import load_config, resume_command, select_source
 from .security import (LifecycleError, LockBusy, atomic_write, checked_path, digest, hash_file, json_write, locked,
                        token, exchange_directory)
@@ -25,6 +25,23 @@ FORCE_PATH = "etc/cmdline.d/20-force_drivers.conf"
 FORCE_BYTES = b"rd.driver.pre=nvidia\n"
 MODULE_STRING_MAX_BYTES = REGISTRY_STRING_MAX_BYTES
 ACTIVATION_GENERATION = 4
+# The installed runtime release (written by `install`); a new loader retries a failed build.
+INSTALLED = "/var/lib/nvidia-vbios/bootstrap/installed.json"
+# An automatic run does not repeat a failed build with the same inputs within this time.
+BUILD_RETRY_SECONDS = 24 * 3600
+
+
+class BuildBackoff(LifecycleError):
+    """An automatic run skipped a build that already failed with the same inputs."""
+    def __init__(self, kernel, memo):
+        failed, retry = memo["finished"], memo["finished"] + BUILD_RETRY_SECONDS
+        def shown(value):
+            return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(value))
+        super().__init__(
+            f"build skipped: it failed at {shown(failed)} with the same kernel, driver, source, configuration and "
+            f"loader ({memo.get('error')}); automatic runs try again after {shown(retry)}, after a kernel or "
+            f"NVIDIA package update or on any change, and `nvbios system reconcile --kernel {kernel}` tries now")
+        self.details = {"failed": failed, "retry_after": retry}
 
 
 def regenerate_argv(raw, kernel, image=None):
@@ -1027,6 +1044,34 @@ class Reconciler:
                 "normal_image": image, "error": str(error), "resume": resume_command(config.raw),
                 "finished": time.time()}
 
+    def _build_inputs(self, plan, planned):
+        """What a module build depends on: kernel, driver, source, configuration, DKMS preparation, loader."""
+        try:
+            release = self._json(self.path(INSTALLED)).get("release")
+        except (LifecycleError, AttributeError):
+            release = None
+        return {"kernel": plan["kernel"], "driver": plan["version"],
+                "source_tree_sha256": plan["source"].get("tree_sha256"),
+                "configuration_sha256": plan["configuration_sha256"], "generation_sha256": plan["generation_sha256"],
+                "preparation_sha256": planned["record"]["preparation_sha256"] if planned else None,
+                "release": release}
+
+    def _failed_build(self, kernel, inputs):
+        """The remembered failure of exactly this build while an automatic retry still waits, else None."""
+        try:
+            memo = self._json(self.state / f"failed-build-{kernel}.json")
+            if (memo.get("inputs") != inputs or
+                    not memo["finished"] <= time.time() < memo["finished"] + BUILD_RETRY_SECONDS):
+                return None
+            # A package transaction or kernel event queued since that build started may have fixed it.
+            pending = self.state / "pending"
+            self.trusted(pending, missing=True)
+            if pending.is_dir() and any(event.stat().st_mtime > memo["started"] for event in pending.glob("*.json")):
+                return None
+            return memo
+        except (LifecycleError, OSError, AttributeError, KeyError, TypeError):
+            return None  # an unreadable memo never stops a build
+
     def _remove_parked(self, drift):
         """After a new READY commit, delete parked modules that are still byte-identical."""
         warnings = []
@@ -1049,7 +1094,21 @@ class Reconciler:
                 warnings.append(f"{record.get('path') if isinstance(record, dict) else record}: {exc}")
         return warnings
 
-    def reconcile(self, kernel, *, dry_run=False, select_default=False):
+    def reconcile(self, kernel, *, dry_run=False, select_default=False, automatic=False):
+        # Every run that is not a dry run brings the runtime VFE layout store up to date as soon as it holds
+        # reconcile.lock (it never fails; uninstall holds the lock too), so an enrolled host gets it on its next
+        # timer run; what it changed or warned joins the result.
+        # `automatic` (the service of the timer, the path unit and the package hooks) skips a build that
+        # already failed with the same inputs; explicit commands always build.
+        if dry_run:
+            return self._reconcile(kernel, dry_run=True, select_default=select_default)
+        layouts = {}
+        result = self._reconcile(kernel, select_default=select_default, layouts=layouts, automatic=automatic)
+        if any(layouts.values()) and isinstance(result, dict):
+            result = dict(result, vfe_layouts=layouts)
+        return result
+
+    def _reconcile(self, kernel, *, dry_run=False, select_default=False, layouts=None, automatic=False):
         if dry_run:
             result = self.dry_run(kernel)
             planned = distribution_patches.plan(self.root, result["version"], token(kernel))
@@ -1067,6 +1126,8 @@ class Reconciler:
         distribution = None
         existing = {}
         attempt_path = self.state / f"attempt-{kernel}.json"
+        failed_build_path = self.state / f"failed-build-{kernel}.json"
+        building = None  # inputs and start of the build below while it runs, remembered if it fails
         owns_lock = False
         package_locks = False
         default_guarded = False
@@ -1075,6 +1136,8 @@ class Reconciler:
             try:
                 locks.enter_context(locked(self.state / "reconcile.lock", self.root))
                 owns_lock = True
+                if layouts is not None:
+                    layouts.update(vfe_layouts.sync(self.root))
                 self.ops.set_log(self.state / f"commands-{kernel}.log")
                 previous_status = self._json(status_path)
                 if not isinstance(previous_status, dict):
@@ -1167,7 +1230,13 @@ class Reconciler:
                     json_write(status_path, existing)
                     json_write(attempt_path, {"state": "ready", "marker": "VBIOS_READY", "kernel": kernel,
                                               "entry": existing["entry"], "reused": True, "finished": time.time()})
+                    failed_build_path.unlink(missing_ok=True)
                     return existing
+                inputs = self._build_inputs(plan, planned)
+                memo = self._failed_build(kernel, inputs) if automatic else None
+                if memo:
+                    raise BuildBackoff(kernel, memo)
+                building = {"inputs": inputs, "started": time.time()}
                 transaction_id = f"{kernel}-{time.time_ns()}"
                 workspace = self.state / "transactions" / transaction_id
                 workspace.mkdir(mode=0o700, parents=True)
@@ -1206,6 +1275,10 @@ class Reconciler:
                     path = built / name
                     metadata[name] = self._check_module(path, plan["version"], kernel, name == "nvidia.ko", secure)
                     modules[name] = path.read_bytes()
+                building = None
+                # These inputs build: a remembered failure for this kernel no longer applies, even if a later
+                # step (publication, initramfs, boot entry) fails and the next automatic run retries.
+                failed_build_path.unlink(missing_ok=True)
                 # Recheck source, package version, identities and ROM/config bytes after the long build.
                 final_plan = self.plan(kernel)
                 if any(final_plan[key] != plan[key] for key in ("configuration_sha256", "version", "source_inspection", "base_sha256")):
@@ -1292,6 +1365,7 @@ class Reconciler:
                 json_write(status_path, status)
                 json_write(attempt_path, {"state": "ready", "marker": "VBIOS_READY", "kernel": kernel,
                                           "entry": status["entry"], "reused": False, "finished": time.time()})
+                failed_build_path.unlink(missing_ok=True)
                 return status
             except Exception as exc:
                 if not owns_lock or profile_disabled:
@@ -1319,25 +1393,34 @@ class Reconciler:
                         shutil.rmtree(prepared)
                     except (LifecycleError, OSError):
                         pass
+                if building is not None:
+                    # Automatic runs skip this exact build for a while (see _failed_build).
+                    try:
+                        json_write(failed_build_path, dict(building, schema_version=1, error=str(exc),
+                                                           finished=time.time()))
+                    except (LifecycleError, OSError):
+                        pass
+                backoff = {"build_backoff": exc.details} if isinstance(exc, BuildBackoff) else {}
                 fail_safe_error = None
                 if package_locks and rollback_error is None and not isinstance(exc, LockBusy):
                     # Only after a clean rollback and with the package locks held.
                     try:
                         installed = self._drift_version(config)
                         if installed:
-                            result = self._fail_safe_locked(config, kernel, installed, exc)
+                            result = dict(self._fail_safe_locked(config, kernel, installed, exc), **backoff)
                             json_write(status_path, result)
                             json_write(attempt_path, result)
                             return result
                         result = self._recover_fallback_locked(config, kernel, exc) if default_guarded else None
                         if result is not None:
+                            result = dict(result, **backoff)
                             json_write(status_path, result)
                             json_write(attempt_path, result)
                             return result
                     except Exception as problem:
                         fail_safe_error = str(problem)
                 status = {"state": "blocked", "marker": "VBIOS_BLOCKED", "kernel": kernel,
-                          "error": str(exc), "rollback_error": rollback_error, "finished": time.time()}
+                          "error": str(exc), "rollback_error": rollback_error, "finished": time.time(), **backoff}
                 if fail_safe_error:
                     status["fail_safe_error"] = fail_safe_error
                 if distribution is not None:

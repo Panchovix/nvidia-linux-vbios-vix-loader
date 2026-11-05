@@ -7,13 +7,14 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 from nvidia_vbios.lifecycle import LifecycleError, Reconciler, source_tree_hash
 from nvidia_vbios.lifecycle.__main__ import installed_kernels, kernel_key, queue_event
-from nvidia_vbios.lifecycle.engine import MODULES, STATE
+from nvidia_vbios.lifecycle.engine import BUILD_RETRY_SECONDS, INSTALLED, MODULES, STATE
 from nvidia_vbios.lifecycle.security import atomic_write, digest, json_write
 
 OLD = "6.19.9-200.fc44.x86_64"
@@ -667,6 +668,116 @@ class LifecycleTests(unittest.TestCase):
             self.assertFalse((workspace / "source").exists())
             self.assertTrue((workspace / "build.log").is_file())
             self.assertTrue((workspace / "source-manifest.json").is_file())
+
+    def failed_build(self, kernel=NEW):
+        path = self.root / STATE.lstrip("/") / f"failed-build-{kernel}.json"
+        return json.loads(path.read_text()) if path.exists() else None
+
+    def automatic(self, kernel=NEW, error="make failed"):
+        """One run of the service (timer, path unit, package hooks); returns the build count."""
+        with self.assertRaisesRegex(LifecycleError, error):
+            self.worker.reconcile(kernel, automatic=True)
+        return self.ops.builds
+
+    def test_the_service_skips_an_identical_failed_build_and_explicit_runs_build(self):
+        self.ops.fault = "build"
+        self.assertEqual(self.automatic(), 1)
+        memo = self.failed_build()
+        self.assertEqual((memo["inputs"]["kernel"], memo["inputs"]["driver"], memo["error"]),
+                         (NEW, VERSION, "make failed; see build.log"))
+        for _ in range(2):
+            self.assertEqual(self.automatic(error=r"build skipped: .*\(make failed.*nvbios system reconcile --kernel "), 1)
+        attempt = json.loads((self.root / STATE.lstrip("/") / f"attempt-{NEW}.json").read_text())
+        self.assertEqual((attempt["state"], attempt["build_backoff"]),
+                         ("blocked", {"failed": memo["finished"], "retry_after": memo["finished"] + BUILD_RETRY_SECONDS}))
+        self.assertEqual(self.failed_build(), memo)  # a skipped run does not extend the wait
+        # nvbios system reconcile, setup and post-install build every time.
+        with self.assertRaisesRegex(LifecycleError, "make failed"):
+            self.worker.reconcile(NEW)
+        self.assertEqual(self.ops.builds, 2)
+        self.ops.fault = None
+        self.assertEqual(self.worker.reconcile(NEW)["state"], "ready")
+        self.assertIsNone(self.failed_build())  # success clears it
+        self.assertEqual(self.worker.reconcile(NEW, automatic=True)["state"], "ready")
+
+    def test_a_build_that_succeeds_clears_the_memo_even_if_a_later_step_fails(self):
+        self.ops.fault = "build"
+        self.assertEqual(self.automatic(), 1)
+        self.assertIsNotNone(self.failed_build())
+        self.ops.fault = "dracut"  # an explicit run builds; publication fails after the build
+        with self.assertRaisesRegex(LifecycleError, "dracut"):
+            self.worker.reconcile(NEW)
+        self.assertEqual(self.ops.builds, 2)
+        self.assertIsNone(self.failed_build())
+        self.ops.fault = None
+        self.assertEqual(self.worker.reconcile(NEW, automatic=True)["state"], "ready")
+        self.assertEqual(self.ops.builds, 3)
+
+    def test_a_failed_build_is_tried_again_after_the_delay(self):
+        self.ops.fault = "build"
+        self.assertEqual(self.automatic(), 1)
+        path = self.root / STATE.lstrip("/") / f"failed-build-{NEW}.json"
+        memo = self.failed_build()
+        for finished in (time.time() - BUILD_RETRY_SECONDS - 1, time.time() + 3600):  # expired, or the clock went back
+            with self.subTest(finished=finished):
+                json_write(path, dict(memo, started=finished - 60, finished=finished))
+                builds = self.ops.builds
+                self.assertEqual(self.automatic(), builds + 1)
+                self.assertEqual(self.automatic(error="build skipped"), builds + 1)  # the new failure waits again
+
+    def test_any_changed_input_or_a_later_package_event_builds_again(self):
+        self.ops.fault = "build"
+        self.assertEqual(self.automatic(), 1)
+        self.assertEqual(self.automatic(error="build skipped"), 1)
+        def config(**changes):
+            self.config.update(changes)
+            self.write_config()
+        def changed_source():
+            source = self.root / "var/lib/nvidia-vbios/sources/p2p"
+            atomic_write(source / "Makefile", b"reviewed build script, next revision\n")
+            config(sources=[dict(self.config["sources"][0], tree_sha256=source_tree_hash(source, self.root))])
+        def new_driver():
+            self.ops.version = "615.78.08"
+            self.register_source("615.78.08")
+        def package_event():
+            # The event of the run that failed is older and skips; one queued after the build started does not.
+            event = self.root / STATE.lstrip("/") / "pending/userspace.json"
+            queue_event("changed", "userspace", self.root)
+            os.utime(event, (self.failed_build()["started"] - 1,) * 2)
+            self.assertEqual(self.automatic(error="build skipped"), self.ops.builds)
+            os.utime(event, (self.failed_build()["finished"],) * 2)
+        changes = {"configuration": lambda: config(jobs=3), "source": changed_source, "driver": new_driver,
+                   "loader": lambda: json_write(self.root / INSTALLED.lstrip("/"), {"schema_version": 1, "release": "a" * 64}),
+                   "package transaction": package_event}
+        for name, change in changes.items():
+            with self.subTest(change=name):
+                builds = self.ops.builds
+                change()
+                self.assertEqual(self.automatic(), builds + 1)
+                self.assertEqual(self.automatic(error="build skipped"), builds + 1)
+        self.add_kernel(NEXT)
+        builds = self.ops.builds
+        self.assertEqual(self.automatic(NEXT), builds + 1)
+        self.assertEqual(self.automatic(NEXT, error="build skipped"), builds + 1)
+
+    def test_a_failed_build_under_drift_is_skipped_with_the_fail_safe_result(self):
+        self.worker.reconcile(NEW)
+        self.stock(NEW, "615.78.08")
+        self.ops.version = "615.78.08"
+        self.register_source("615.78.08")
+        self.ops.fault = "build"
+        first = self.worker.reconcile(NEW, automatic=True)
+        self.assertEqual((first["state"], self.ops.builds), ("driver-drift", 2))
+        self.assertIn("make failed", first["error"])
+        second = self.worker.reconcile(NEW, automatic=True)
+        self.assertEqual((second["state"], self.ops.builds), ("driver-drift", 2))
+        self.assertIn("build skipped", second["error"])
+        self.assertEqual(second["build_backoff"]["failed"], self.failed_build()["finished"])
+        self.assertEqual(self.ops.environment["saved_entry"], "normal-" + NEW)
+        self.ops.fault = None
+        ready = self.worker.reconcile(NEW)
+        self.assertEqual((ready["state"], ready["driver"], self.ops.builds), ("ready", "615.78.08", 3))
+        self.assertIsNone(self.failed_build())
 
     def test_registered_new_source_ends_drift_and_removes_parked_modules(self):
         first = self.worker.reconcile(NEW)

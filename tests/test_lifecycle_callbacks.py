@@ -42,6 +42,19 @@ class CallbackTests(unittest.TestCase):
      self.assertEqual(cli.main(args),0)
     ops.assert_transaction_idle.assert_not_called()
 
+ def test_only_the_service_skips_a_build_that_failed_with_the_same_inputs(self):
+  for explicit,automatic in ((False,True),(True,False)):
+   with self.subTest(explicit=explicit):
+    ops=Mock(platform=SimpleNamespace(package_provider='rpm'));worker=Mock(ops=ops);worker.reconcile.return_value={'state':'ready'}
+    with tempfile.TemporaryDirectory() as temp,patch.object(cli,'STATE',temp),patch.object(cli,'Reconciler',return_value=worker),patch.object(cli,'installed_kernels',return_value=['6.10']),contextlib.redirect_stdout(io.StringIO()):
+     self.assertEqual(cli.main(['reconcile'],explicit=explicit),0)
+    worker.reconcile.assert_called_once_with('6.10',dry_run=False,select_default=False,automatic=automatic)
+  # `nvbios system reconcile` (also run by setup) is explicit.
+  from nvidia_vbios import cli as nvbios
+  with patch.object(cli,'main',return_value=0) as lifecycle:
+   self.assertEqual(nvbios.main(['system','reconcile','--kernel','6.10']),0)
+  lifecycle.assert_called_once_with(['reconcile','--kernel','6.10'],explicit=True)
+
  def test_queue_with_busy_reconcile_lock_is_deferred_and_still_queued(self):
   case=fixtures.LifecycleTests(methodName='runTest');case.setUp();self.addCleanup(case.doCleanups)
   ready=case.worker.reconcile(fixtures.NEW);case.add_kernel(fixtures.NEXT)

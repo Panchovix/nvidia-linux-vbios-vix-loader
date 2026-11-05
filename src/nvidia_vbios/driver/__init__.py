@@ -16,7 +16,7 @@ import shutil
 import tempfile
 
 from ..limits import REGISTRY_STRING_MAX_BYTES
-from ._payload import (CACHED_ARGUMENTS_ABI, HELPERS, LOADER_FUNCTIONS, LOADER_LICENSE,
+from ._payload import (CACHED_ARGUMENTS_ABIS, HELPERS, LOADER_FUNCTIONS, LOADER_LICENSE,
                        PARSER_HEADER, REGISTRY_STRING_PARAMETERS)
 
 __all__ = ["DriverPatchError", "inspect_source", "prepare_source", "apply_to_tree"]
@@ -95,7 +95,8 @@ def _abi_valid(text: str) -> bool:
     # Compare the complete wire declarations, including the nested structs.
     start = text.find('typedef struct NV_ABI_STABLE MESSAGE_QUEUE_INIT_ARGUMENTS')
     end = text.find('} GSP_ARGUMENTS_CACHED;')
-    return start >= 0 and end > start and _normalize(text[start:end + len('} GSP_ARGUMENTS_CACHED;')]) == _normalize(CACHED_ARGUMENTS_ABI)
+    return start >= 0 and end > start and _normalize(text[start:end + len('} GSP_ARGUMENTS_CACHED;')]) in {
+        _normalize(abi) for abi in CACHED_ARGUMENTS_ABIS}
 
 
 def _read_required(tree: Path) -> dict[str, str]:

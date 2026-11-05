@@ -94,7 +94,7 @@ def system_main(argv):
         from .bootstrap import main as bootstrap_main
         return bootstrap_main(argv)
     from .lifecycle.__main__ import main as lifecycle_main
-    return lifecycle_main(argv)
+    return lifecycle_main(argv, explicit=True)
 
 
 def parser():

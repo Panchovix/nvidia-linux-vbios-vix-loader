@@ -52,7 +52,7 @@ GUARD = (BootAdapter(Path('/'), {'boot': {'backend': 'grub', 'initramfs': 'dracu
          .split(b"<<'NVIDIA_VBIOS_GRUB'\n", 1)[1].rsplit(b'NVIDIA_VBIOS_GRUB\n', 1)[0])
 SOURCE = re.compile(rb'(?m)^\s*source\s+(?:\$prefix|\$\{prefix\})/nvidia-vbios\.cfg\s*$')
 MACHINE = re.compile(rb'(?m)^\s*machine-id\s+(\S+)\s*$')
-STATE_CHILDREN = ('bootstrap', 'lifecycle', 'setup', 'sources', 'roms', 'enrolled-devices.json')
+STATE_CHILDREN = ('bootstrap', 'lifecycle', 'setup', 'sources', 'roms', 'vfe-layouts', 'enrolled-devices.json')
 ACTIVE = ('the reconcile service is running: wait until it ends (`systemctl status nvidia-vbios-reconcile.service`), '
           'then run uninstall again; stopping it during a DKMS or akmods build can leave that driver\'s modules half installed')
 FOREIGN = 'not recorded by this system: another system on this computer may use it'

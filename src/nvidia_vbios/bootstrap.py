@@ -25,7 +25,7 @@ from .lifecycle.security import (LifecycleError, atomic_write, checked_path, dig
                                  hash_file, json_write, locked, resolve_trusted_file,
                                  source_tree_hash, token)
 from .lifecycle.config import ARCHIVE_VERIFIED, load_config
-from .lifecycle import hook_templates
+from .lifecycle import hook_templates, vfe_layouts
 from .lifecycle.engine import CONFIG, STATE, Reconciler, parse_bls
 
 BASE = '/var/lib/nvidia-vbios/bootstrap'
@@ -645,6 +645,10 @@ class Bootstrap:
         writes[BASE + '/enrolled.json'] = (_json_bytes({'schema_version': 1, 'configuration_sha256': digest(_json_bytes(configuration)),
                                                       'version': version, 'migration': migration}), 0o600)
         report.update(self._publish(writes, 'enroll'))
+        # The runtime VFE layouts of the stored payloads with hooks; this never fails the enrollment.
+        layouts = vfe_layouts.sync(self.root)
+        if any(layouts.values()):
+            report['vfe_layouts'] = layouts
         return dict(report, state='enrolled', device_count=len(devices), sources=sources)
 
     def _legacy_target(self, name):

@@ -23,7 +23,7 @@ from nvidia_vbios.driver_update import DriverUpdate, FETCH_RECORD
 from nvidia_vbios.lifecycle import Reconciler, source_fetch
 from nvidia_vbios.lifecycle.__main__ import after_drift
 from nvidia_vbios.lifecycle.config import load_config
-from nvidia_vbios.lifecycle.security import LifecycleError, LockBusy, digest, json_write
+from nvidia_vbios.lifecycle.security import LifecycleError, LockBusy, atomic_write, digest, json_write
 from nvidia_vbios.onboarding import Onboarding, main as onboarding_main
 
 VERSION = '615.78.08'
@@ -386,6 +386,9 @@ class AutoSourceTests(unittest.TestCase):
     def auto(self):
         return self.worker.auto_source(VERSION, open_url=self.opener)
 
+    def release(self):
+        return json.loads(self.f.worker.path(BASE + '/installed.json').read_text())['release']
+
     def test_package_upgrade_registers_the_tag_and_the_next_reconcile_is_ready(self):
         drift = self.drift()
         fetched = self.auto()
@@ -441,7 +444,8 @@ class AutoSourceTests(unittest.TestCase):
                 json_write(self.f.worker.path(CONFIG), dict(original, **changes))
                 self.assertEqual(self.worker.auto_source(version, open_url=self.opener)['state'], state)
         json_write(self.f.worker.path(CONFIG), original)
-        json_write(self.f.worker.path(FETCH_RECORD), {'version': VERSION, 'state': 'rejected', 'error': 'earlier'})
+        json_write(self.f.worker.path(FETCH_RECORD), {'version': VERSION, 'state': 'rejected', 'error': 'earlier',
+                                                      'release': self.release()})
         self.assertEqual(self.auto()['error'], 'earlier')
         self.f.ops.assert_transaction_idle = Mock(side_effect=LockBusy('update/build lock busy: rpm'))
         json_write(self.f.worker.path(FETCH_RECORD), {})
@@ -459,10 +463,62 @@ class AutoSourceTests(unittest.TestCase):
         rejected = self.auto()
         self.assertEqual(rejected['state'], 'rejected')
         self.assertIn('not a supported unpatched', rejected['error'])
+        self.assertEqual(rejected['release'], self.release())
         self.assertEqual(self.auto(), rejected)
         self.assertEqual(len(self.calls), 3)
         self.assertNotIn(VERSION, [source['version'] for source in self.config()['sources']])
         self.assertEqual(list(self.f.worker.path(STATE + '/fetch').iterdir()), [])
+
+    def test_a_tag_rejected_by_an_older_loader_is_tried_again_after_a_loader_update(self):
+        self.drift()
+        self.archive = self.tag('615.78.07')  # this loader cannot use the tag
+        self.assertEqual(self.auto()['state'], 'rejected')
+        installed = json.loads(self.f.worker.path(BASE + '/installed.json').read_text())
+        json_write(self.f.worker.path(BASE + '/installed.json'), dict(installed, release='f' * 64))  # a newer loader
+        self.archive = self.tag(VERSION)  # which can
+        fetched = self.auto()
+        self.assertEqual((fetched['state'], len(self.calls)), ('registered', 2))
+        self.assertEqual(self.config()['sources'][0]['version'], VERSION)
+        self.assertEqual(self.auto()['state'], 'present')
+        self.assertEqual(len(self.calls), 2)
+
+    def test_a_rejected_tag_stays_rejected_for_the_same_loader(self):
+        self.drift()
+        self.archive = self.tag('615.78.07')
+        rejected = self.auto()
+        self.archive = AssertionError('no network expected')
+        for _ in range(2):
+            self.assertEqual(self.auto(), rejected)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_a_rejected_record_without_the_release_is_tried_once_more(self):
+        self.drift()
+        json_write(self.f.worker.path(FETCH_RECORD), {'schema_version': 1, 'version': VERSION, 'state': 'rejected',
+                                                      'error': 'written by an older loader', 'finished': 1.0})
+        self.archive = self.tag('615.78.07')  # still refused: now with the release, so it stays refused
+        rejected = self.auto()
+        self.assertEqual((rejected['state'], rejected['release'], len(self.calls)), ('rejected', self.release(), 1))
+        self.assertEqual(self.auto(), rejected)
+        self.assertEqual(len(self.calls), 1)
+        json_write(self.f.worker.path(FETCH_RECORD), {'version': VERSION, 'state': 'rejected', 'error': 'older'})
+        self.archive = self.tag(VERSION)  # or accepted
+        self.assertEqual(self.auto()['state'], 'registered')
+        self.assertEqual(len(self.calls), 2)
+
+    def test_an_unreadable_installed_record_never_stops_auto_source(self):
+        self.drift()
+        path = self.f.worker.path(BASE + '/installed.json')
+        original = self.config()
+        for content in (b'not json', b'[]'):
+            with self.subTest(content=content):
+                atomic_write(path, content)
+                json_write(self.f.worker.path(CONFIG), dict(original, auto_source=False))
+                self.assertEqual(self.auto()['state'], 'off')
+                json_write(self.f.worker.path(CONFIG), original)
+                json_write(self.f.worker.path(FETCH_RECORD), {})
+                self.archive = self.tag('615.78.07')
+                rejected = self.auto()
+                self.assertEqual((rejected['state'], rejected['release']), ('rejected', None))
 
     def test_a_fetch_directory_left_by_a_killed_service_is_removed(self):
         self.drift()

@@ -570,7 +570,8 @@ class SetupTests(unittest.TestCase):
                 redirect_stdout(io.StringIO()):
             self.assertEqual(lifecycle.main(['reconcile', '--kernel', OLD, '--select-default', '--dry-run']), 0)
             self.assertEqual(lifecycle.main(['reconcile', '--dry-run']), 0)
-        self.assertEqual(calls, [(OLD, {'dry_run': True, 'select_default': True}), (OLD, {'dry_run': True, 'select_default': False})])
+        self.assertEqual(calls, [(OLD, {'dry_run': True, 'select_default': True, 'automatic': True}),
+                                 (OLD, {'dry_run': True, 'select_default': False, 'automatic': True})])
 
 
 class SetupWithLifecycleTests(unittest.TestCase):

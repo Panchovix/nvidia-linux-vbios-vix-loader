@@ -7,14 +7,26 @@ written. It patches the NVIDIA open kernel modules so the GSP firmware starts wi
 them in a separate boot entry, rebuilds them automatically after kernel updates, and keeps your normal boot
 entry as a fallback.
 
-Works with NVIDIA 615.x (R615) drivers. It may stop working in a future driver if NVIDIA decides to change or
-remove the override, so after every driver update run `nvbios system status` and check an edited value (for
-example the power limits in `nvidia-smi -q -d POWER`).
+Works with NVIDIA 615.x (R615) drivers and 620.70.06. It may stop working in a future driver if NVIDIA decides to
+change or remove the override, so after every driver update run `nvbios system status` and check an edited value
+(for example the power limits in `nvidia-smi -q -d POWER`).
 
-**Driver 620.** NVIDIA released 620.70.06 but has not published its open-gpu-kernel-modules source yet, so the
-loader cannot build the override for it. If you install it, the loader boots a normal entry without the override
-(see [Kernel and driver updates](#kernel-and-driver-updates)), and with a P2P build you would also need a P2P port of
-620. Support comes in a later loader update, once NVIDIA publishes the source.
+**Driver 620.** 620.70.06 is supported from loader 0.1.5. Loader 0.1.4 refused its source, so a 620 install made
+with it runs without the override (see [Kernel and driver updates](#kernel-and-driver-updates) for what boots then).
+
+To get the override back, update the installed loader first. Pulling the clone is not enough, because the window keeps
+using the installed copy until `install` replaces it. From the updated clone, follow
+[Updating an existing loader installation](#updating-an-existing-loader-installation) with `disable` in place of
+`pre-install`, which refuses while a normal entry is the default:
+
+```sh
+sudo nvbios system disable
+sudo nvbios system install --repository "$PWD"
+sudo nvbios system post-install --source /path/to/open-gpu-kernel-modules-620.70.06
+```
+
+Instead of the last command you can open the window, choose to download the source and press **Load**. Reboot when
+it finishes. P2P builds still need a 620 P2P source tree, passed with `--p2p-preferred`.
 
 Thanks to **@pantsoftime** ([overclock.net](https://www.overclock.net)), whose original `vbios_override` patch
 this project is built on. Without it, none of this would have been possible.
@@ -33,7 +45,7 @@ Corporation.
 
 | Platform | State |
 | --- | --- |
-| Fedora 43, GRUB/BLS, dracut, DNF5, NVIDIA 615.x open kernel modules installed with the `.run` installer | **Supported**: used on real hardware |
+| Fedora 43, GRUB/BLS, dracut, DNF5, NVIDIA 615.x or 620.70.06 open kernel modules installed with the `.run` installer | **Supported**: used on real hardware |
 | RHEL family, Debian/Ubuntu, Arch/CachyOS/EndeavourOS, systemd-boot, UKI, Secure Boot (all with the `.run` driver) | **Experimental**: users report it working on Ubuntu, Kubuntu, Debian, CachyOS and Arch Linux; the maintainer only uses Fedora |
 | NVIDIA drivers from a package manager (RPM Fusion, NVIDIA repos, apt, pacman), open kernel modules 615+ | **Experimental**: a user reports it working on Ubuntu 26.04 with apt, with the source registered by hand; the automatic download after a driver upgrade has synthetic tests only |
 | rpm-ostree, proprietary NVIDIA kernel modules, drivers older than 615 | Not supported |
@@ -100,9 +112,9 @@ yet been verified.
 
 ## What you need
 
-- A working NVIDIA 615.x (R615) driver with the **open** kernel modules; `nvidia-smi` must list your GPUs.
+- A working NVIDIA 615.x (R615) or 620.70.06 driver with the **open** kernel modules; `nvidia-smi` must list your GPUs.
 - The unpatched source of the open kernel modules for the **exact** installed version, for example:
-  `git clone --depth 1 --branch 615.78.08 https://github.com/NVIDIA/open-gpu-kernel-modules`
+  `git clone --depth 1 --branch 620.70.06 https://github.com/NVIDIA/open-gpu-kernel-modules`
 - Python 3.11 or newer, the headers for the running kernel (`kernel-devel` on Fedora), `make`, `dracut`,
   `grub2-editenv` and `mokutil`. With DNF5, also `libdnf5-plugin-actions`. For a distribution's DKMS build fixes
   (step 4 of Install), also GNU `patch`, which Ubuntu installs with `dkms`.
@@ -238,6 +250,8 @@ expanded GPU count merely by downloading this repository.
 
 - **Kernel updates** are handled automatically: the package hook and a retry timer rebuild the modules and the
   boot entry for the new kernel, with the distribution's DKMS build fixes for that kernel (see step 4 of Install).
+  If a build fails, the timer repeats it only after 24 hours, unless the package hook runs again or the kernel,
+  driver, source, profile or loader changes. `sudo nvbios system reconcile` tries it at once.
 - **Driver updates** (`.run` installs): run `sudo nvbios system pre-install` before removing the old driver,
   install the new driver, then register the matching unpatched source of the new version:
 

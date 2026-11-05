@@ -7,15 +7,28 @@ flash de la tarjeta. Parchea los módulos abiertos del kernel de NVIDIA para que
 tu VBIOS, los compila en una entrada de arranque aparte, los recompila automáticamente tras actualizaciones del kernel y
 mantiene tu entrada normal como respaldo.
 
-Funciona con los drivers NVIDIA 615.x (R615). Podría dejar de funcionar en un driver futuro si NVIDIA decide
-cambiar o quitar el reemplazo, así que después de cada actualización del driver revisa `nvbios system status` y
-un valor editado (por ejemplo los límites de potencia en `nvidia-smi -q -d POWER`).
+Funciona con los drivers NVIDIA 615.x (R615) y con el 620.70.06. Podría dejar de funcionar en un driver futuro si
+NVIDIA decide cambiar o quitar el reemplazo, así que después de cada actualización del driver revisa
+`nvbios system status` y un valor editado (por ejemplo los límites de potencia en `nvidia-smi -q -d POWER`).
 
-**Driver 620.** NVIDIA publicó el 620.70.06, pero todavía no publica su código de open-gpu-kernel-modules, así que
-el loader no puede compilar el reemplazo para esa versión. Si lo instalas, el loader arranca una entrada normal sin el
-reemplazo (ver [Actualizaciones del kernel y del driver](#actualizaciones-del-kernel-y-del-driver)), y con un build
-P2P además necesitarías un port P2P de la 620. El soporte llega en una actualización posterior del loader, cuando
-NVIDIA publique el código.
+**Driver 620.** El 620.70.06 tiene soporte desde el loader 0.1.5. El loader 0.1.4 rechazaba su código fuente, así
+que una instalación de la 620 hecha con él funciona sin el reemplazo (ver
+[Actualizaciones del kernel y del driver](#actualizaciones-del-kernel-y-del-driver) para saber qué arranca entonces).
+
+Para recuperar el reemplazo, primero actualiza el loader instalado. No basta con actualizar el clon, porque la ventana
+sigue usando la copia instalada hasta que `install` la reemplaza. Desde el clon actualizado, sigue
+[Actualizar una instalación existente del loader](#actualizar-una-instalación-existente-del-loader) con `disable` en
+lugar de `pre-install`, que se niega mientras una entrada normal sea la predeterminada:
+
+```sh
+sudo nvbios system disable
+sudo nvbios system install --repository "$PWD"
+sudo nvbios system post-install --source /ruta/a/open-gpu-kernel-modules-620.70.06
+```
+
+En lugar del último comando puedes abrir la ventana, elegir descargar el código fuente y presionar **Cargar**.
+Reinicia al terminar. Los builds P2P siguen necesitando un árbol de código fuente P2P de la 620, pasado con
+`--p2p-preferred`.
 
 Gracias a **@pantsoftime** ([overclock.net](https://www.overclock.net)): este proyecto se basa en su parche
 original `vbios_override`, y sin él nada de esto habría sido posible.
@@ -34,7 +47,7 @@ de NVIDIA Corporation.
 
 | Plataforma | Estado |
 | --- | --- |
-| Fedora 43, GRUB/BLS, dracut, DNF5, módulos abiertos NVIDIA 615.x instalados con el instalador `.run` | **Soportado**: usado en hardware real |
+| Fedora 43, GRUB/BLS, dracut, DNF5, módulos abiertos NVIDIA 615.x o 620.70.06 instalados con el instalador `.run` | **Soportado**: usado en hardware real |
 | Familia RHEL, Debian/Ubuntu, Arch/CachyOS/EndeavourOS, systemd-boot, UKI, Secure Boot (todos con el driver `.run`) | **Experimental**: usuarios reportan que funciona en Ubuntu, Kubuntu, Debian, CachyOS y Arch Linux; el mantenedor solo usa Fedora |
 | Drivers NVIDIA de un gestor de paquetes (RPM Fusion, repositorios de NVIDIA, apt, pacman), módulos abiertos 615+ | **Experimental**: un usuario reporta que funciona en Ubuntu 26.04 con apt, con el código fuente registrado a mano; la descarga automática tras una actualización del driver solo tiene pruebas sintéticas |
 | rpm-ostree, módulos de kernel propietarios de NVIDIA, drivers anteriores a 615 | No soportado |
@@ -104,9 +117,9 @@ todavía no se ha verificado un arranque real con 17 o 32 GPUs.
 
 ## Qué necesitas
 
-- Un driver NVIDIA 615.x (R615) funcionando con los módulos **abiertos**; `nvidia-smi` debe listar tus GPUs.
+- Un driver NVIDIA 615.x (R615) o 620.70.06 funcionando con los módulos **abiertos**; `nvidia-smi` debe listar tus GPUs.
 - El código fuente sin parchear de los módulos abiertos para la versión instalada **exacta**, por ejemplo:
-  `git clone --depth 1 --branch 615.78.08 https://github.com/NVIDIA/open-gpu-kernel-modules`
+  `git clone --depth 1 --branch 620.70.06 https://github.com/NVIDIA/open-gpu-kernel-modules`
 - Python 3.11 o superior, los headers del kernel en uso (`kernel-devel` en Fedora), `make`, `dracut`,
   `grub2-editenv` y `mokutil`. Con DNF5, también `libdnf5-plugin-actions`. Para las correcciones de compilación del
   DKMS de una distribución (paso 4 de Instalación), también GNU `patch`, que Ubuntu instala junto con `dkms`.
@@ -246,7 +259,9 @@ amplía el límite del runtime o módulo que ya tenías instalado.
 
 - **Kernel**: automático. El hook de paquetes y un temporizador de reintento recompilan los módulos y la
   entrada de arranque para el kernel nuevo, con las correcciones de compilación del DKMS de la distribución para ese
-  kernel (ver el paso 4 de Instalación).
+  kernel (ver el paso 4 de Instalación). Si una compilación falla, el temporizador solo la repite después de 24 horas,
+  salvo que el hook de paquetes vuelva a correr o cambien el kernel, el driver, el código fuente, el perfil o el
+  loader. `sudo nvbios system reconcile` la intenta de inmediato.
 - **Driver** (instalación `.run`): ejecuta `sudo nvbios system pre-install` antes de quitar el driver anterior,
   instala el nuevo y registra el código fuente sin parchear de la nueva versión:
 

@@ -683,7 +683,7 @@ class AfterDisableTests(unittest.TestCase):
                         redirect_stdout(io.StringIO()) as output:
                     self.assertEqual(lifecycle_main.main(['reconcile']), 0)  # the service of the path unit and timer
                 result = json.loads(output.getvalue())
-                self.assertEqual(calls, [(NEWER, {'dry_run': False, 'select_default': False})])
+                self.assertEqual(calls, [(NEWER, {'dry_run': False, 'select_default': False, 'automatic': True})])
                 self.assertEqual((result['state'], result['kernel'], boot.default()), ('ready', NEWER, result['entry']))
                 self.assertEqual(self.state(boot, 'transaction.json')['previous_default'], first['entry'])
 
@@ -817,7 +817,7 @@ class AfterDisableTests(unittest.TestCase):
                         redirect_stderr(io.StringIO()) as error:
                     self.assertEqual(lifecycle_main.main(['reconcile']), 1)  # the service of the path unit and timer
                 self.assertRegex(error.getvalue(), plain_refusal(boot))
-                self.assertEqual(calls, [{'dry_run': False, 'select_default': False}])
+                self.assertEqual(calls, [{'dry_run': False, 'select_default': False, 'automatic': True}])
                 self.assertEqual((boot.default(), boot.ops.builds), (boot.normal, 1))
                 rebuilt = self.select(boot)
                 boot.worker.enable(OLD)

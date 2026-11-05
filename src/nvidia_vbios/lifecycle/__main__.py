@@ -82,7 +82,9 @@ def installed_kernels(root=Path("/")):
                    and (root / f"boot/vmlinuz-{path.name}").is_file()), key=kernel_key)
 
 
-def main(argv=None):
+def main(argv=None, *, explicit=False):
+    """`explicit`: a user command (`nvbios system ...`); the service of the timer, the path unit and the package
+    hooks runs without it and skips a build that already failed with the same inputs."""
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
     queue = sub.add_parser("queue")
@@ -143,7 +145,8 @@ def main(argv=None):
                     if not kernels:
                         raise LifecycleError("no installed kernel with a supported normal boot entry found")
                     kernel = args.kernel or kernels[-1]
-                    result = worker.reconcile(kernel, dry_run=args.dry_run, select_default=args.select_default)
+                    result = worker.reconcile(kernel, dry_run=args.dry_run, select_default=args.select_default,
+                                              automatic=not explicit)
                     break
                 except LifecycleError as exc:
                     platform = getattr(worker.ops, "platform", None)
