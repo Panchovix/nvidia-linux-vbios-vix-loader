@@ -130,6 +130,24 @@ todavía no se ha verificado un arranque real con 17 o 32 GPUs.
   normal que `prepare` guarda como `fallback_entry` en el perfil (en Ubuntu, `gnulinux-simple-` seguido del UUID del
   sistema de archivos raíz).
 - Secure Boot desactivado, o tu propia clave para firmar módulos: pasa `--signing-key` y `--signing-certificate` a `prepare`.
+  Donde el kernel exige módulos firmados con Secure Boot (Fedora, RHEL, Ubuntu y Debian bloquean el kernel cuando
+  Secure Boot está activado), esa clave debe estar inscrita como MOK (`mokutil --import`). Con Secure Boot usando tus
+  propias claves de firmware (por ejemplo sbctl) y sin shim/MOK, el kernel no confía en esas claves para los módulos,
+  así que solo funciona si el kernel no exige firmas de módulos, que es lo predeterminado en Arch (sin
+  `CONFIG_MODULE_SIG_FORCE` ni bloqueo por Secure Boot, sin `module.sig_enforce=1` ni `lockdown=` en las opciones).
+  En ese caso la clave para firmar módulos es opcional y no necesita MOK. La UKI se sigue firmando con la clave de tu
+  db de firmware (`--uki-key`, `--uki-certificate`).
+- Espacio en la partición de arranque. El loader conserva `retain_boot_generations` generaciones (3 por defecto) y
+  borra las más antiguas solo después de que arrancas con la nueva, así que la partición necesita espacio para esas
+  generaciones más la que se está compilando, además de los archivos propios de la distribución. En una ESP pequeña,
+  pon `"retain_boot_generations": 2` en `profile.json` antes de `enroll`. Por generación: GRUB pone en `/boot` una copia del kernel, el microcódigo y el initramfs del override; systemd-boot pone
+  lo mismo más su entrada en la ESP (o XBOOTLDR); UKI pone solo el `.efi` en la ESP (con el kernel, el microcódigo y el
+  initramfs del override adentro) y guarda las copias en `/var/lib/nvidia-vbios`; Fedora pone el initramfs del
+  override y su entrada en `/boot`. El initramfs del override pesa más o menos lo mismo que tu initramfs normal más
+  los módulos NVIDIA, el firmware GSP y los payloads (unos 100-150 MB, menos si tu initramfs normal ya trae el driver
+  NVIDIA), así que una generación UKI ocupa aproximadamente la UKI de tu distribución más eso: revísalo con
+  `ls -l /boot/EFI/Linux` (o `/boot/initramfs-*` y `/boot/vmlinuz-*`) y `df -h /boot`. `reconcile` revisa el espacio
+  libre antes de compilar y, si falta, indica el punto de montaje.
 - Un **payload** de VBIOS por GPU: una imagen de una sola cadena para esa tarjeta exacta. Los volcados de ROM
   completos con dos bancos se rechazan. Con la herramienta de línea de comandos de Vix Editor:
   `./nvbios-<versión>-linux-x86_64 normalize editada.rom gpu0.bin`.

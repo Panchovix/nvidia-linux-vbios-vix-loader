@@ -31,6 +31,47 @@ INSTALLED = "/var/lib/nvidia-vbios/bootstrap/installed.json"
 BUILD_RETRY_SECONDS = 24 * 3600
 
 
+# Free-space preflight (see Reconciler._space_needs): each filesystem that receives new boot files
+# must hold their estimated size plus this margin before anything is built.
+SPACE_MARGIN = 32 << 20
+# The override image adds a roughly fixed amount to the normal initramfs (NVIDIA modules, GSP firmware,
+# payloads): about 100-110 MiB compressed when the normal image has no NVIDIA driver (measured on Fedora).
+OVERRIDE_ALLOWANCE = 160 << 20
+
+
+def override_image_estimate(normal):
+    """Estimated override image size from the normal initramfs size: normal + max(25 %, OVERRIDE_ALLOWANCE)."""
+    return normal + max(normal // 4, OVERRIDE_ALLOWANCE)
+
+
+def _filesystem(path):
+    """(device, mount point, available bytes) of the filesystem that holds `path`, or would once it is created."""
+    path = Path(path)
+    while not path.exists() and path != path.parent:
+        path = path.parent
+    device = path.stat().st_dev
+    mount = path
+    while mount != mount.parent and mount.parent.stat().st_dev == device:
+        mount = mount.parent
+    stats = os.statvfs(path)
+    return device, mount, stats.f_bavail * stats.f_frsize
+
+
+def check_free_space(needs):
+    """Refuse, before any build and without changing state, when a filesystem cannot take the new files.
+
+    `needs` maps each new file (physical path) to its estimated size in bytes."""
+    totals = {}
+    for path, size in needs.items():
+        device, mount, available = _filesystem(path)
+        totals.setdefault(device, [mount, available, SPACE_MARGIN])[2] += size
+    for mount, available, needed in totals.values():
+        if needed > available:
+            raise LifecycleError(f"not enough free space on {mount}: the new boot generation needs about "
+                                 f"{-(-needed >> 20)} MiB there, {available >> 20} MiB available; free space on {mount} "
+                                 "(for example remove unused kernels or old boot images) and retry")
+
+
 class BuildBackoff(LifecycleError):
     """An automatic run skipped a build that already failed with the same inputs."""
     def __init__(self, kernel, memo):
@@ -619,6 +660,12 @@ class Reconciler:
 
     def _record_boot_publication(self, fleet, plan, publication, deployment):
         """Portable backends register generation-owned kernels and boot descriptors."""
+
+    def _space_needs(self, plan):
+        """New boot files and their estimated sizes for the free-space preflight (override_image_estimate)."""
+        normal = self.path(f"/boot/initramfs-{plan['kernel']}.img")
+        self.trusted(normal)
+        return {self.path("/boot/" + plan["image"]): override_image_estimate(normal.stat().st_size)}
 
     def _check_module(self, path, version, kernel, primary=False, signed=False):
         self.trusted(path)
@@ -1232,6 +1279,7 @@ class Reconciler:
                                               "entry": existing["entry"], "reused": True, "finished": time.time()})
                     failed_build_path.unlink(missing_ok=True)
                     return existing
+                check_free_space(self._space_needs(plan))
                 inputs = self._build_inputs(plan, planned)
                 memo = self._failed_build(kernel, inputs) if automatic else None
                 if memo:

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from nvidia_vbios.lifecycle.boot import BootAdapter
+from nvidia_vbios.lifecycle.boot import UKI_GENERATIONS, BootAdapter
 from nvidia_vbios.lifecycle import portable_retention as subject
 from nvidia_vbios.lifecycle.security import LifecycleError, atomic_write, checked_path, digest, json_write
 
@@ -57,7 +57,7 @@ class PortableRetentionTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def setup(self, backend='grub', count=4):
+    def setup(self, backend='grub', count=4, state_copies=()):
         worker = self.worker = Worker(self.root, backend)
         fleet = {'boot_generations': {}, 'normal_fallback': {'entry': 'normal'}, 'shared_boot_files': {}}
         for number in range(count):
@@ -65,7 +65,8 @@ class PortableRetentionTests(unittest.TestCase):
             managed = f'vbios-{kernel}-{number:020x}'
             entry = managed + {'grub': '', 'systemd-boot': '.conf', 'uki': '.efi'}[backend]
             boot_root = '/boot' if backend == 'grub' else '/efi'
-            base = f'{boot_root}/nvidia-vbios/{managed}'
+            # Loader 0.1.6+ keeps UKI copies on the root filesystem; earlier generations on the ESP.
+            base = f'{UKI_GENERATIONS}/{managed}' if number in state_copies else f'{boot_root}/nvidia-vbios/{managed}'
             descriptor = (f'/boot/grub/nvidia-vbios-entries/{managed}.cfg' if backend == 'grub'
                           else f'/efi/loader/entries/{managed}.conf' if backend == 'systemd-boot'
                           else f'/efi/EFI/Linux/{managed}.efi')
@@ -292,6 +293,30 @@ class PortableRetentionTests(unittest.TestCase):
             self.assertTrue(self.worker.path(item['path']).exists())
         self.assertEqual(self.prune()['removed'], [oldest])
         self.assertNotIn('retention_pending', self.fleet())
+
+    def test_uki_generations_with_esp_or_root_filesystem_copies_are_removed_by_recorded_paths(self):
+        fleet = self.setup('uki', count=5, state_copies=(1, 3, 4))
+        old = list(fleet['boot_generations'])[:2]
+        result = self.prune()
+        self.assertEqual(result['removed'], old, result)
+        for entry in old:
+            for item in fleet['boot_generations'][entry]['files']:
+                self.assertFalse(self.worker.path(item['path']).exists(), item['path'])
+        self.assertTrue(any(item['path'].startswith(UKI_GENERATIONS + '/') for item in fleet['boot_generations'][old[1]]['files']))
+        for entry in list(fleet['boot_generations'])[2:]:
+            for item in fleet['boot_generations'][entry]['files']:
+                self.assertTrue(self.worker.path(item['path']).exists(), item['path'])
+
+    def test_a_uki_generation_on_the_root_filesystem_still_needs_its_efi_on_a_reviewed_root(self):
+        fleet = self.setup('uki', count=4, state_copies=(0,))
+        oldest = next(iter(fleet['boot_generations']))
+        record = fleet['boot_generations'][oldest]
+        moved = {name.replace('/efi/EFI/Linux/', '/elsewhere/EFI/Linux/'): role for name, role in record['roles'].items()}
+        record['roles'] = moved
+        record['files'] = [dict(item, path=item['path'].replace('/efi/EFI/Linux/', '/elsewhere/EFI/Linux/')) for item in record['files']]
+        json_write(self.worker.state / 'fleet.json', fleet)
+        with self.assertRaisesRegex(LifecycleError, 'outside reviewed boot roots'):
+            self.prune()
 
     def test_retiring_changed_file_blocks_restart_without_adopting_it(self):
         fleet = self.setup('uki')

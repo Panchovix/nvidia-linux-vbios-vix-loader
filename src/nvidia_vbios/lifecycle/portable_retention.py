@@ -10,7 +10,7 @@ import base64
 from pathlib import Path, PurePosixPath
 import re
 
-from .boot import BootAdapter, entry_identity
+from .boot import UKI_GENERATIONS, BootAdapter, entry_identity
 from .retention import running_matches, _sync_parent
 from .security import LifecycleError, atomic_write, digest, hash_file, json_write, token
 
@@ -55,11 +55,19 @@ def _records(worker, fleet):
                 raise LifecycleError('portable retention roles differ from owned files')
             roots = {'/boot'} if adapter.backend == 'grub' else {
                 adapter.boot_root, *[adapter.config[key] for key in ('esp', 'xbootldr', 'boot_root') if key in adapter.config]}
-            base = next((f'{root}/nvidia-vbios/{managed}' for root in roots
-                         if f'{root}/nvidia-vbios/{managed}/vmlinuz' in owned), None)
+            bases = [f'{root}/nvidia-vbios/{managed}' for root in roots]
+            if adapter.backend == 'uki':
+                # Since 0.1.6 a UKI generation keeps its copies on the root filesystem; older ones on the ESP.
+                bases.append(f'{UKI_GENERATIONS}/{managed}')
+            base = next((name for name in bases if f'{name}/vmlinuz' in owned), None)
             if base is None:
                 raise LifecycleError('portable retention kernel is outside reviewed generation root')
-            boot_root = base.split('/nvidia-vbios/', 1)[0]
+            if base.startswith(UKI_GENERATIONS + '/'):
+                boot_root = next((root for root in sorted(roots) if f'{root}/EFI/Linux/{managed}.efi' in owned), None)
+                if boot_root is None:
+                    raise LifecycleError('portable retention UKI is outside reviewed boot roots')
+            else:
+                boot_root = base.split('/nvidia-vbios/', 1)[0]
             descriptor = (f'{adapter.grub_root}/nvidia-vbios-entries/{managed}.cfg' if adapter.backend == 'grub'
                           else f'{boot_root}/loader/entries/{managed}.conf' if adapter.backend == 'systemd-boot'
                           else f'{boot_root}/EFI/Linux/{managed}.efi')

@@ -21,7 +21,7 @@ import time
 from .bootstrap import Bootstrap, BootstrapError, BASE, OWNER, RUNTIME, ENABLED, ACTION_TARGETS, UNITS, _platform
 from .lifecycle import initramfs
 from .lifecycle.__main__ import kernel_key
-from .lifecycle.boot import BootAdapter, entry_identity
+from .lifecycle.boot import UKI_GENERATIONS, BootAdapter, entry_identity
 from .lifecycle.config import load_config
 from .lifecycle.engine import CONFIG, STATE, Reconciler, regenerate_command
 from .lifecycle.portable import efi_variable
@@ -402,6 +402,8 @@ class Uninstall(Bootstrap):
         report['kept'] += [{'path': name, 'reason': FOREIGN} for name in foreign]
         if foreign:
             report['next_steps'].append('if no other system on this computer uses the loader, delete by hand: ' + ', '.join(foreign))
+        # UKI generation copies on the root filesystem (loader 0.1.6+): only this system writes there.
+        images += self._children(UKI_GENERATIONS, lambda name: True, directory=True)
         report['remove']['boot'] += list(dict.fromkeys(name for name in first + entries + descriptors + images + temporary
                                                        if name not in foreign))
 

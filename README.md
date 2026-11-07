@@ -124,6 +124,24 @@ yet been verified.
   `foreign or unrelated boot default preserved`. The id to use is the normal entry that `prepare` records as
   `fallback_entry` in the profile (on Ubuntu, `gnulinux-simple-` followed by the root file system's UUID).
 - Secure Boot off, or your own module signing key: pass `--signing-key` and `--signing-certificate` to `prepare`.
+  Where the kernel enforces module signatures under Secure Boot (Fedora, RHEL, Ubuntu and Debian lock the kernel
+  down when Secure Boot is on), that key must be enrolled as a MOK (`mokutil --import`). With Secure Boot using
+  your own firmware keys (for example sbctl) and no shim/MOK, the kernel does not trust those keys for modules, so
+  this works only when the kernel does not enforce module signatures, which is Arch's default (no
+  `CONFIG_MODULE_SIG_FORCE` or Secure Boot lockdown, no `module.sig_enforce=1` or `lockdown=` in the options). Then a
+  module signing key is optional and needs no MOK. The UKI itself is still signed with the key in your firmware db
+  (`--uki-key`, `--uki-certificate`).
+- Room on the boot partition. The loader keeps `retain_boot_generations` generations (default 3) and removes older
+  ones only after you boot into the new one, so the partition needs room for that many generations plus the one being
+  built, plus the distribution's own files. On a small ESP, set `"retain_boot_generations": 2` in `profile.json`
+  before `enroll`. Per generation: GRUB puts a kernel copy,
+  microcode and the override initramfs in `/boot`; systemd-boot puts the same plus its entry on the ESP (or
+  XBOOTLDR); UKI puts only the `.efi` on the ESP (kernel, microcode and override initramfs embedded) and keeps the
+  copies under `/var/lib/nvidia-vbios`; Fedora puts the override initramfs and its entry in `/boot`. The override
+  initramfs is about your normal one plus the NVIDIA modules, GSP firmware and payloads (about 100-150 MB, less if
+  your normal initramfs already has the NVIDIA driver), so a UKI generation is about your distribution's own UKI plus
+  that: check with `ls -l /boot/EFI/Linux` (or `/boot/initramfs-*` and `/boot/vmlinuz-*`) and
+  `df -h /boot`. `reconcile` checks the free space before it builds and names the mount point if it is short.
 - One VBIOS **payload** per GPU: a single-chain image for that exact card. Full ROM dumps that contain two
   banks are refused. With Vix Editor's command-line tool: `./nvbios-<version>-linux-x86_64 normalize edited.rom gpu0.bin`.
   For Ada and Ampere, add the `--representation` given above (`ada-relocated-v1`, `ada-relocated-v2` or

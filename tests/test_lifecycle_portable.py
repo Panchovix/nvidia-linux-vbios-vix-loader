@@ -584,6 +584,46 @@ class PortableLifecycleTests(unittest.TestCase):
         self.assertEqual({path: path.read_bytes() for path in previous}, previous)
         self.assertIn(first['entry'], self.fleet()['boot_generations'])
 
+    def test_uki_generation_copies_stay_off_the_esp_and_only_the_efi_lands_there(self):
+        from nvidia_vbios.lifecycle.boot import UKI_GENERATIONS
+        self.setup_profile('uki', true_uki=True)
+        result, generation = self.assert_success(self.new)
+        roles = {role: name for name, role in generation['roles'].items()}
+        self.assertTrue(roles['uki'].startswith('/efi/EFI/Linux/vbios-'))
+        for role in ('kernel', 'initramfs'):
+            self.assertTrue(roles[role].startswith(UKI_GENERATIONS + '/'), roles[role])
+        self.assertFalse((self.root / 'efi/nvidia-vbios').exists())
+        self.assertFalse(list((self.root / 'efi').rglob('.vbios-*')))
+
+    def test_free_space_preflight_refuses_before_any_build_or_state_change(self):
+        from unittest.mock import patch
+        from nvidia_vbios.lifecycle import engine
+        self.setup_profile('uki', true_uki=True)
+        before = self.fleet() if (self.root / STATE.lstrip('/') / 'fleet.json').exists() else None
+        needs = {}
+        real = engine._filesystem
+        def tight(path):
+            device, mount, available = real(path)
+            if str(path).startswith(str(self.root / 'efi')):
+                return 'esp', Path('/efi'), 20 << 20  # under the 32 MiB margin alone
+            return device, mount, available
+        original = self.worker._space_needs
+        def record(plan):
+            needs.update(original(plan))
+            return needs
+        with patch.object(engine, '_filesystem', tight), patch.object(self.worker, '_space_needs', record):
+            with self.assertRaisesRegex(LifecycleError, r'not enough free space on /efi: .* needs about 193 MiB there, 20 MiB available'):
+                self.worker.reconcile(self.new)
+        self.assertEqual(self.ops.builds, 0)
+        self.assertEqual(self.ops.environment['saved_entry'], self.config['fallback_entry'])
+        self.assertFalse(list((self.root / 'efi/EFI/Linux').glob('vbios-*.efi')))
+        self.assertFalse((self.root / f'usr/lib/modules/{self.new}/updates/vbios-override').exists())
+        self.assertEqual(self.fleet() if before is not None else None, before)
+        efi = [name for name in needs if str(name).startswith(str(self.root / 'efi'))]
+        self.assertEqual(len(efi), 1)  # only the .efi goes to the ESP; its estimate covers kernel, microcode and image
+        normal = len(('NORMAL INITRD ' + self.new).encode())
+        self.assertEqual(needs[efi[0]], len(('REVIEWED KERNEL ' + self.new).encode()) + len(MICROCODE) + normal + (160 << 20))
+
     def test_uki_failure_rolls_back_before_default_selection(self):
         self.setup_profile('uki')
         self.ops.fail_uki = True

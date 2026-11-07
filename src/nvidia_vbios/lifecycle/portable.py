@@ -14,7 +14,8 @@ import time
 from .boot import BootAdapter, entry_identity
 from .config import load_config, select_source
 from .engine import (Reconciler, CONFIG, STATE, ACTIVATION_PATH, FORCE_PATH, FORCE_BYTES,
-                     ACTIVATION_GENERATION, BOOTABLE_IMAGES, modprobe_configuration, typed_parameters)
+                     ACTIVATION_GENERATION, BOOTABLE_IMAGES, modprobe_configuration, typed_parameters,
+                     override_image_estimate)
 from .security import LifecycleError, checked_path, digest, hash_file, json_write, atomic_write, token
 
 EFI_GUID = '4a67b082-0a4c-41cf-b6c7-440b29bb8c4f'
@@ -478,9 +479,11 @@ class PortableReconciler(Reconciler):
                 evidence=self.ops.portable_initramfs(kernel,temp,list(targets),activation_config=activation,force_config=force,config=config.raw)
                 extracted=self.ops.portable_extract(temp,[*evidence,*[str(p.relative_to(self.root)) for p in targets]])
             else:
-                evidence=initramfs.build(self.ops,kernel,temp,list(targets),activation_config=activation,force_config=force,config=config.raw)
+                # Build and extraction trees go to the transaction workspace on the root
+                # filesystem; only the finished image is written next to its destination.
+                evidence=initramfs.build(self.ops,kernel,temp,list(targets),activation_config=activation,force_config=force,config=config.raw,scratch=workspace)
                 expected={**evidence,**{str(p.relative_to(self.root)):data for p,data in targets.items()}}
-                extracted=initramfs.extract(self.ops,temp,list(expected),config=config.raw)
+                extracted=initramfs.extract(self.ops,temp,list(expected),workspace,config=config.raw)
             expected={**evidence,**{str(p.relative_to(self.root)):data for p,data in targets.items()}}
             if evidence.get(ACTIVATION_PATH)!=plan['activation_bytes'] or any(extracted.get(k)!=v for k,v in expected.items()):
                 raise LifecycleError('portable initramfs lacks exact activation/module/firmware/early-load bytes')
@@ -500,7 +503,7 @@ class PortableReconciler(Reconciler):
                 if builder:
                     builder(self.path(artifacts.kernel_path),combined,temporary,cmdline=plan['boot_entry'].options,config=config.raw)
                 else:
-                    initramfs.build_uki(self.ops,self.path(artifacts.kernel_path),combined,temporary,cmdline=plan['boot_entry'].options,config=config.raw)
+                    initramfs.build_uki(self.ops,self.path(artifacts.kernel_path),combined,temporary,cmdline=plan['boot_entry'].options,config=config.raw,scratch=workspace)
                 entry_bytes = temporary.read_bytes()
                 self._validate_existing(config, fleet, kernel, {entry: entry_bytes})
                 self._stage_write(journal,entry,entry_bytes,mode=0o600,prepared_path=temporary)
@@ -534,6 +537,26 @@ class PortableReconciler(Reconciler):
                 'boot_files':[{'path':'/'+str(p.relative_to(self.root)),'sha256':hash_file(p)} for p in paths],
                 'roles':artifacts.roles,'shared_boot_files':shared,
                 'force_driver_sha256':digest(b''.join(evidence[k] for k in sorted(evidence)))}
+
+    def _space_needs(self,plan):
+        """Free-space estimate (engine.check_free_space): the override image follows
+        engine.override_image_estimate from the normal initramfs (or the normal UKI's .initrd); kernel/microcode
+        copies at their size; a UKI also holds the kernel,
+        microcode and image again, and its combined initrd is staged in the transaction workspace."""
+        artifacts,entry=plan['boot_plan'],plan['boot_entry']
+        sections=entry.metadata.get('uki_sections')
+        if sections:
+            normal=len(sections['.initrd'])
+        else:
+            source=self.path(entry.initrd_path);self.trusted(source);normal=source.stat().st_size
+        image=override_image_estimate(normal)
+        copies={self.path(name):len(data) for name,data in artifacts.copy_files.items() if not name.endswith('/normal-initramfs.img')}
+        needs=dict(copies)
+        needs[self.path(artifacts.initrd_path)]=image
+        if self.boot.backend=='uki':
+            needs[self.path(artifacts.entry_path)]=sum(copies.values())+image
+            needs[self.state/'transactions']=image
+        return needs
 
     def _record_boot_publication(self,fleet,plan,publication,deployment):
         fleet.pop('boot_recovery', None)

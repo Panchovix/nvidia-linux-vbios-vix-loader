@@ -182,6 +182,43 @@ class PortableInitramfsTests(unittest.TestCase):
         self.assertEqual(command[-1], self.kernel)
         self.assertFalse(list(self.destination.parent.glob('.vbios-build-*')))
 
+    def test_build_extract_and_uki_scratch_stay_in_the_given_workspace(self):
+        # Issue 7: lsinitcpio --extract and private configs ran in the image's directory, on a small ESP.
+        scratch = self.root / 'var/lib/nvidia-vbios/lifecycle/transactions/one'
+        scratch.mkdir(mode=0o700, parents=True)
+        boot = self.root / 'efi/nvidia-vbios'
+        boot.mkdir(mode=0o700, parents=True)
+        self.destination = boot / 'image.img'
+        seen = []
+        original = self.ops._run
+        def run(command, **kwargs):
+            # Every private work path (config, hooks, extraction tree, ukify inputs) has a .vbios- directory.
+            seen.extend(str(value).lstrip('@') for value in [*command[1:], kwargs.get('cwd')]
+                        if value is not None and '/.vbios-' in str(value))
+            return original(command, **kwargs)
+        self.ops._run = run
+        for mode in ('busybox', 'systemd'):
+            with self.subTest(mode=mode):
+                self.ops.arch_mode = mode
+                seen.clear()
+                subject.build(self.ops, self.kernel, self.destination, [self.module, self.firmware],
+                              activation_config=self.activation, force_config=self.force,
+                              config={'boot': {'initramfs': 'mkinitcpio'}}, scratch=scratch)
+                self.assertTrue(seen)
+                self.assertTrue(all(Path(value).is_relative_to(scratch) for value in seen), seen)
+                self.assertTrue(any(Path(c[1].get('cwd', '/')).is_relative_to(scratch)
+                                    for c in self.ops.commands if Path(c[0][0]).name == 'lsinitcpio' and '--extract' in c[0]))
+        seen.clear()
+        kernel, image = scratch / 'kernel', scratch / 'initrd'
+        atomic_write(kernel, b'immutable kernel bytes')
+        atomic_write(image, b'initramfs')
+        subject.build_uki(self.ops, kernel, image, boot / 'test.efi', cmdline='root=UUID=reviewed ro',
+                          config={'boot': {'uki': {}}}, scratch=scratch)
+        self.assertTrue(seen)
+        self.assertTrue(all(Path(value).is_relative_to(scratch) for value in seen), seen)
+        self.assertEqual(sorted(path.name for path in boot.iterdir()), ['image.img', 'test.efi'])
+        self.assertEqual(set(scratch.iterdir()), {kernel, image})  # the private directories are gone
+
     def test_portable_dracut_preserves_force_loading_and_separate_include_arguments(self):
         path = self.firmware.with_name('0000:03:00.0-1234567890abcdef.bin')
         atomic_write(path, b'BDF FIRMWARE')

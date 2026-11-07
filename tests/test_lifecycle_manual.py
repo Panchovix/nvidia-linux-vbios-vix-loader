@@ -352,5 +352,104 @@ class ManualProviderTests(unittest.TestCase):
         self.operations._run.assert_called_once_with(["systemctl", "restart", f"akmods@{fixtures.NEW}.service"], timeout=3600)
 
 
+
+class ModuleSignatureEnforcementTests(unittest.TestCase):
+    """Secure Boot with firmware-db keys only (sbctl, no shim/MOK): a MOK is needed only when the kernel enforces."""
+    KERNEL = "7.2.14-arch1-1"
+
+    def setUp(self):
+        import tempfile
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.root.chmod(0o700)
+        self.config_file = self.root / f"usr/lib/modules/{self.KERNEL}/build/.config"
+        atomic_write(self.config_file, b"CONFIG_MODULE_SIG=y\n# CONFIG_MODULE_SIG_FORCE is not set\nCONFIG_SECURITY_LOCKDOWN_LSM=y\n")
+        atomic_write(self.root / "sys/module/module/parameters/sig_enforce", b"N\n")
+        atomic_write(self.root / "sys/kernel/security/lockdown", b"[none] integrity confidentiality\n")
+        self.operations = SystemOperations.__new__(SystemOperations)
+        self.operations.filesystem_root = self.root
+        self.operations.log = None
+        self.commands = []
+        self.test_key = 1
+        self.operations._run = MagicMock(side_effect=self.command)
+        self.operations._text = lambda command: "SecureBoot enabled\n"
+
+    def command(self, command, **kwargs):
+        self.commands.append([str(value) for value in command])
+        code = self.test_key if command[:2] == ["mokutil", "--test-key"] else 0
+        return subprocess.CompletedProcess(command, code, stdout=b"", stderr=b"")
+
+    def enforcement(self, options=""):
+        from nvidia_vbios.lifecycle.system import module_signature_enforcement
+        return module_signature_enforcement(self.KERNEL, options, self.root)
+
+    def test_arch_defaults_do_not_enforce(self):
+        self.assertIsNone(self.enforcement("root=UUID=reviewed rw module.sig_enforce=0 lockdown=none"))
+        (self.root / "sys/module/module/parameters/sig_enforce").unlink()
+        (self.root / "sys/kernel/security/lockdown").unlink()
+        self.assertIsNone(self.enforcement())
+
+    def test_config_options_or_running_kernel_enforce(self):
+        original = self.config_file.read_bytes()
+        for name in ("CONFIG_MODULE_SIG_FORCE", "CONFIG_LOCK_DOWN_IN_EFI_SECURE_BOOT",
+                     "CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY", "CONFIG_LOCK_DOWN_KERNEL_FORCE_CONFIDENTIALITY",
+                     "CONFIG_EFI_SECURE_BOOT_LOCK_DOWN", "CONFIG_EFI_SECURE_BOOT_SIG_ENFORCE", "CONFIG_IMA_ARCH_POLICY"):
+            with self.subTest(config=name):
+                atomic_write(self.config_file, original + f"{name}=y\n".encode())
+                self.assertIn(name, self.enforcement())
+        atomic_write(self.config_file, original)
+        for options in ("quiet module.sig_enforce=1", "module.sig_enforce=Y", "module.sig_enforce", "lockdown=integrity",
+                        "lockdown=confidentiality"):
+            with self.subTest(options=options):
+                self.assertIn("boot options", self.enforcement(options))
+        atomic_write(self.root / "sys/module/module/parameters/sig_enforce", b"Y\n")
+        self.assertIn("running kernel enforces", self.enforcement())
+        atomic_write(self.root / "sys/module/module/parameters/sig_enforce", b"N\n")
+        atomic_write(self.root / "sys/kernel/security/lockdown", b"none [integrity] confidentiality\n")
+        self.assertIn("locked down", self.enforcement())
+
+    def test_missing_unreadable_or_unparseable_inputs_fail_closed(self):
+        atomic_write(self.root / "sys/kernel/security/lockdown", b"garbage\n")
+        self.assertIn("locked down", self.enforcement())
+        atomic_write(self.root / "sys/kernel/security/lockdown", b"[none] integrity\n")
+        atomic_write(self.config_file, b"# nothing here\n")
+        self.assertIn("cannot parse", self.enforcement())
+        self.config_file.unlink()
+        self.assertIn("cannot read", self.enforcement())
+        atomic_write(self.config_file, b"CONFIG_MODULE_SIG=y\n")
+        self.config_file.chmod(0o666)  # untrusted
+        self.assertIn("cannot read", self.enforcement())
+
+    def test_without_a_key_modules_stay_unsigned_only_when_not_enforced(self):
+        modules = [self.root / "nvidia.ko"]
+        self.assertFalse(self.operations.sign(modules, self.KERNEL, {}))
+        self.assertIsNone(self.operations._signing_paths(self.KERNEL, {}))
+        self.assertEqual(self.commands, [])
+        config = {"normal_boot": {"options": "root=UUID=reviewed rw module.sig_enforce=1"}}
+        with self.assertRaisesRegex(LifecycleError, "Secure Boot enabled but enrolled signing key/certificate not configured "
+                                                    r"\(the boot options contain module.sig_enforce=1"):
+            self.operations.sign(modules, self.KERNEL, config)
+
+    def test_a_configured_key_signs_and_needs_a_mok_only_when_enforced(self):
+        from nvidia_vbios.lifecycle import system
+        signing = {"signing": {"key": str(self.root / "keys/module.key"), "certificate": str(self.root / "keys/module.der")}}
+        atomic_write(self.root / "keys/module.key", b"KEY", 0o600)
+        atomic_write(self.root / "keys/module.der", b"CERT", 0o644)
+        modules = [self.root / "nvidia.ko"]
+        with patch.object(system, "checked_path", lambda path, *args, **kwargs: Path(path)):
+            self.assertTrue(self.operations.sign(modules, self.KERNEL, signing))
+            self.assertEqual([command[1] for command in self.commands], ["sha256"])  # sign-file, no mokutil --test-key
+            self.commands.clear()
+            atomic_write(self.config_file, b"CONFIG_MODULE_SIG=y\nCONFIG_LOCK_DOWN_IN_EFI_SECURE_BOOT=y\n")
+            with self.assertRaisesRegex(LifecycleError, "not enrolled .*CONFIG_LOCK_DOWN_IN_EFI_SECURE_BOOT"):
+                self.operations.sign(modules, self.KERNEL, signing)
+            self.assertEqual(self.commands[0][:2], ["mokutil", "--test-key"])
+            self.test_key = 0
+            self.commands.clear()
+            self.assertTrue(self.operations.sign(modules, self.KERNEL, signing))
+            self.assertEqual([command[1] for command in self.commands], ["--test-key", "sha256"])
+
+
 if __name__ == "__main__":
     unittest.main()

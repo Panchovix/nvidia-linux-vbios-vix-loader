@@ -29,6 +29,62 @@ COMMANDS = {
 
 
 AKMODS_UNIT_DIRECTORIES = ("/etc/systemd/system", "/usr/lib/systemd/system")
+# Kernel configuration that makes Secure Boot (or the kernel itself) refuse unsigned or untrusted modules
+# (the last two are the pre-5.4 distribution lockdown patch sets).
+_ENFORCING_CONFIG = ("CONFIG_MODULE_SIG_FORCE", "CONFIG_LOCK_DOWN_IN_EFI_SECURE_BOOT",
+                     "CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY", "CONFIG_LOCK_DOWN_KERNEL_FORCE_CONFIDENTIALITY",
+                     "CONFIG_EFI_SECURE_BOOT_LOCK_DOWN", "CONFIG_EFI_SECURE_BOOT_SIG_ENFORCE")
+
+
+def module_signature_enforcement(kernel, options="", root=Path("/")):
+    """Why `kernel` may refuse an out-of-tree module that the MOK list does not trust, or None.
+
+    With Secure Boot on and firmware-db keys only (sbctl, no shim), the kernel does not trust those keys for
+    modules, so the modules load only when it does not enforce signatures. Enforced: the target kernel's
+    configuration forces signatures or Secure Boot lockdown, its normal entry's options ask for it, or the
+    running kernel enforces now. A missing, unreadable or unparseable input counts as enforced."""
+    root = Path(root)
+    try:
+        build = (root / f"usr/lib/modules/{token(kernel)}/build").resolve()
+        config = checked_path(build / ".config", root)
+        values = dict(line.split("=", 1) for line in config.read_text().splitlines()
+                      if line.startswith("CONFIG_") and "=" in line)
+    except (LifecycleError, OSError, UnicodeError, ValueError):
+        return f"cannot read the kernel configuration of {kernel}"
+    if not values:
+        return f"cannot parse the kernel configuration of {kernel}"
+    for name in _ENFORCING_CONFIG:
+        if values.get(name) == "y":
+            return f"{kernel} is built with {name}=y"
+    # The IMA architecture policy calls set_module_sig_enforced() under Secure Boot.
+    if values.get("CONFIG_IMA_ARCH_POLICY") == "y" and values.get("CONFIG_MODULE_SIG") == "y":
+        return f"{kernel} is built with CONFIG_IMA_ARCH_POLICY=y"
+    for word in str(options or "").split():
+        name, _, value = word.partition("=")
+        if name == "module.sig_enforce" and value not in ("0", "n", "N", "f", "F", "off"):
+            return f"the boot options contain {word}"
+        if name == "lockdown" and value in ("integrity", "confidentiality"):
+            return f"the boot options contain {word}"
+    running = root / "sys/module/module/parameters/sig_enforce"
+    lockdown = root / "sys/kernel/security/lockdown"
+    try:
+        if running.exists() and running.read_text().strip() != "N":
+            return "the running kernel enforces module signatures"
+        if lockdown.exists():
+            selected = re.search(r"\[(\w+)\]", lockdown.read_text())
+            if not selected or selected[1] != "none":
+                return "the running kernel is locked down"
+    except (OSError, UnicodeError):
+        return "cannot read the running kernel's module signature enforcement"
+    return None
+
+
+def _normal_options(config):
+    """Kernel options of the recorded normal entry (portable profiles); Fedora reads its kernel config only."""
+    values = [config.get("normal_boot", {}).get("options", ""),
+              config.get("boot", {}).get("normal", {}).get("options", "") if isinstance(config.get("boot"), dict) else ""]
+    return " ".join(value for value in values if isinstance(value, str))
+
 
 class SystemOperations:
     def __init__(self):
@@ -434,17 +490,24 @@ class SystemOperations:
             raise LifecycleError("cannot determine Secure Boot state")
 
     def _signing_paths(self, kernel, config):
+        """Secure Boot module signing inputs, or None when the target kernel does not enforce module signatures
+        and no key is configured. When it enforces, the certificate must be an enrolled MOK."""
         signing = config.get("signing", {})
+        enforced = module_signature_enforcement(kernel, _normal_options(config), getattr(self, "filesystem_root", Path("/")))
+        self.signature_enforcement = enforced
         if not signing.get("key") or not signing.get("certificate"):
-            raise LifecycleError("Secure Boot enabled but enrolled signing key/certificate not configured")
+            if enforced:
+                raise LifecycleError("Secure Boot enabled but enrolled signing key/certificate not configured "
+                                     f"({enforced}, so modules need a key enrolled as a MOK)")
+            return None
         key, certificate = Path(signing["key"]), Path(signing["certificate"])
         checked_path(key); checked_path(certificate)
         if key.stat().st_mode & 0o077:
             raise LifecycleError("Secure Boot private key must be root-only mode 0600")
         tool = Path(f"/usr/lib/modules/{kernel}/build/scripts/sign-file").resolve()
         checked_path(tool)
-        if self._run(["mokutil", "--test-key", certificate], allow_failure=True).returncode:
-            raise LifecycleError("Secure Boot signing certificate is not enrolled")
+        if enforced and self._run(["mokutil", "--test-key", certificate], allow_failure=True).returncode:
+            raise LifecycleError(f"Secure Boot signing certificate is not enrolled ({enforced})")
         return tool, key, certificate
 
     def build(self, source, kernel, jobs, log):
@@ -461,9 +524,17 @@ class SystemOperations:
             if not any(value in state for value in ("secureboot disabled", "secure boot disabled", "efi variables are not supported")):
                 raise LifecycleError("cannot determine Secure Boot state before module signing")
             return False
-        tool, key, certificate = self._signing_paths(kernel, config)
+        paths = self._signing_paths(kernel, config)
+        if paths is None:
+            print(f"VBIOS_SIGNING: Secure Boot is on and {kernel} does not enforce module signatures; "
+                  "no signing key configured, modules left unsigned", file=sys.stderr)
+            return False
+        tool, key, certificate = paths
         for module in modules:
             self._run([tool, "sha256", key, certificate, module])
+        if not self.signature_enforcement:
+            print(f"VBIOS_SIGNING: Secure Boot is on and {kernel} does not enforce module signatures; "
+                  "modules signed with the configured key without a MOK check", file=sys.stderr)
         return True
 
     def depmod(self, kernel):

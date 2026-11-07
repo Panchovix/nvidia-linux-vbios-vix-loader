@@ -128,16 +128,25 @@ def _targets(targets, root, kernel):
     return result
 
 
-def build(ops, kernel, destination, targets, *, activation_config, force_config, config):
+def _scratch(scratch, destination, root):
+    """Private work directory parent: the caller's trusted scratch on the root
+    filesystem (the transaction workspace), never a small boot partition.
+    Without one, the destination's directory (legacy callers and tests)."""
+    return checked_path(Path(scratch) if scratch is not None else Path(destination).parent, root)
+
+
+def build(ops, kernel, destination, targets, *, activation_config, force_config, config, scratch=None):
     """Build a separate image and return members requiring exact verification.
 
     The caller must extract/compare every returned member and every target
     before publication. Return evidence identifies real boot-time force loading;
     the legacy dracut command-line marker is retained only for compatibility.
+    Private configuration and extraction trees go under ``scratch``.
     """
     kernel = token(kernel)
     root = _root(ops)
     destination = checked_path(Path(destination), root, missing=True)
+    work_parent = _scratch(scratch, destination, root)
     activation = _trusted_file(activation_config, root)
     force = _trusted_file(force_config, root)
     selected = _targets(targets, root, kernel)
@@ -145,7 +154,7 @@ def build(ops, kernel, destination, targets, *, activation_config, force_config,
         raise LifecycleError("initramfs output aliases a build input")
     evidence = {ACTIVATION_PATH: activation.read_bytes(), FORCE_PATH: force.read_bytes(), LOAD_PATH: LOAD_BYTES}
     name = backend(config)
-    with tempfile.TemporaryDirectory(prefix=".vbios-build-", dir=destination.parent) as temporary:
+    with tempfile.TemporaryDirectory(prefix=".vbios-build-", dir=work_parent) as temporary:
         work = Path(temporary)
         includes = [(activation, ACTIVATION_PATH, 0o644), (force, FORCE_PATH, 0o644)]
         load = work / "load.conf"
@@ -219,14 +228,14 @@ def build(ops, kernel, destination, targets, *, activation_config, force_config,
     if name == "mkinitcpio":
         # Detect the actual /init rather than infer its implementation from a
         # shell config. systemd ignores mkinitcpio's busybox runtime hooks.
-        init = extract(ops, destination, [INIT_PATH], config=config)[INIT_PATH]
+        init = extract(ops, destination, [INIT_PATH], work_parent, config=config)[INIT_PATH]
         evidence[INIT_PATH] = init
         if init is not None and init.startswith(_LINK_PROOF):
             if init[len(_LINK_PROOF):] not in (b"usr/lib/systemd/systemd", b"/usr/lib/systemd/systemd"):
                 raise LifecycleError("mkinitcpio image has an unsupported init symlink")
             evidence.pop(ARCH_LOAD_PATH)
             members = [SYSTEMD_INIT_PATH, SYSTEMD_UNIT_PATH, SYSTEMD_WANT_PATH, SYSTEMD_LOAD_BINARY, LOAD_PATH]
-            generated = extract(ops, destination, members, config=config)
+            generated = extract(ops, destination, members, work_parent, config=config)
             _verify_systemd_registration(generated)
             # Native binaries/unit bytes remain unchanged; the enabled link and
             # exact modules-load.d request prove this service can actually run.
@@ -239,7 +248,7 @@ def build(ops, kernel, destination, targets, *, activation_config, force_config,
             native_init = _trusted_file(_physical(root, "/usr/lib/initcpio/init"), root).read_bytes()
             if init != _FILE_PROOF + native_init:
                 raise LifecycleError("mkinitcpio image does not use the trusted busybox init")
-            generated = extract(ops, destination, ["config"], config=config)["config"]
+            generated = extract(ops, destination, ["config"], work_parent, config=config)["config"]
             _verify_arch_registration(generated)
             evidence["config"] = generated
     return evidence
@@ -499,7 +508,7 @@ def _db_has_certificate(data, certificate):
     return found
 
 
-def build_uki(ops, kernel_image, initrd, destination, *, cmdline, config):
+def build_uki(ops, kernel_image, initrd, destination, *, cmdline, config, scratch=None):
     """Build and verify a UKI around immutable kernel/concatenated initrd inputs.
 
     A firmware-db signing certificate is required when Secure Boot is enabled.
@@ -510,6 +519,7 @@ def build_uki(ops, kernel_image, initrd, destination, *, cmdline, config):
     kernel = _trusted_file(kernel_image, root)
     initrd = _trusted_file(initrd, root)
     destination = checked_path(Path(destination), root, missing=True)
+    work_parent = _scratch(scratch, destination, root)
     if destination in (kernel, initrd):
         raise LifecycleError("UKI output aliases an immutable input")
     if isinstance(cmdline, Path):
@@ -531,7 +541,7 @@ def build_uki(ops, kernel_image, initrd, destination, *, cmdline, config):
     signing = config.get("boot", {}).get("uki", {}).get("signing")
     if secure and not signing:
         raise LifecycleError("Secure Boot UKI requires explicit PE signing key/certificate")
-    with tempfile.TemporaryDirectory(prefix=".vbios-uki-", dir=destination.parent) as temporary:
+    with tempfile.TemporaryDirectory(prefix=".vbios-uki-", dir=work_parent) as temporary:
         work = Path(temporary)
         private = work / "ukify.conf"
         atomic_write(private, b"[UKI]\n")

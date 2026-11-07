@@ -218,6 +218,24 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(before, sorted(str(path.relative_to(self.root)) for path in self.root.rglob("*")))
         self.assertEqual(self.ops.builds, 0)
 
+    def test_free_space_preflight_blocks_fedora_before_the_build(self):
+        from unittest.mock import patch
+        from nvidia_vbios.lifecycle import engine
+        normal, before = self.snapshot_normal(), dict(self.ops.environment)
+        size = (self.root / f"boot/initramfs-{NEW}.img").stat().st_size
+        self.assertEqual(self.worker._space_needs(self.worker.plan(NEW)),
+                         {self.root / "boot" / self.worker.plan(NEW)["image"]: size + (160 << 20)})
+        # A fixed allowance for modules and firmware, or 25 % of a large normal image.
+        self.assertEqual(engine.override_image_estimate(187_000_000), 187_000_000 + (160 << 20))
+        self.assertEqual(engine.override_image_estimate(1 << 30), (1 << 30) * 5 // 4)
+        with patch.object(engine, "_filesystem", lambda path: ("boot", Path("/boot"), 1 << 20)):
+            with self.assertRaisesRegex(LifecycleError, "not enough free space on /boot: .* 1 MiB available"):
+                self.worker.reconcile(NEW)
+        self.assertEqual(self.ops.builds, 0)
+        self.assertEqual((self.snapshot_normal(), self.ops.environment), (normal, before))
+        self.assertFalse(list((self.root / "boot").glob("initramfs-*-vbios-*")))
+        self.assertFalse((self.root / f"usr/lib/modules/{NEW}/updates/vbios-override").exists())
+
     def test_success_installs_every_module_and_exact_initramfs_before_default(self):
         normal = self.snapshot_normal()
         result = self.worker.reconcile(NEW)

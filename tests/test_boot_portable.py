@@ -270,6 +270,33 @@ class PortableBootTests(unittest.TestCase):
         with self.assertRaises(LifecycleError):
             adapter.render(entry, plan)
 
+    def test_uki_cmdline_ending_in_a_line_break_is_accepted_and_interior_breaks_are_not(self):
+        # mkinitcpio and kernel-install copy /etc/kernel/cmdline verbatim: "<options> \n\0" (issue 5).
+        for cmdline, options in ((b'root=UUID=reviewed rw quiet \n\0', 'root=UUID=reviewed rw quiet '),
+                                 (b'root=UUID=reviewed rw\r\n', 'root=UUID=reviewed rw')):
+            with self.subTest(cmdline=cmdline):
+                self.write('/efi/EFI/Linux/normal.efi', pe_image({'.linux': b'kernel', '.initrd': b'normal',
+                                                                  '.cmdline': cmdline, '.uname': KERNEL.encode()}))
+                entry = self.adapter('uki', esp='/efi').discover(KERNEL)
+                self.assertEqual(entry.options, options)
+                self.assertEqual(self.adapter('uki', esp='/efi').fallback_record(entry)['options'], options)
+        self.write('/efi/EFI/Linux/normal.efi', pe_image({'.linux': b'kernel', '.initrd': b'normal',
+                                                          '.cmdline': b'root=UUID=reviewed\nrw\n\0', '.uname': KERNEL.encode()}))
+        with self.assertRaisesRegex(LifecycleError, 'unresolved variables or shell syntax'):
+            self.adapter('uki', esp='/efi').discover(KERNEL)
+
+    def test_uki_generation_copies_go_to_the_loader_state_and_only_the_efi_to_the_esp(self):
+        from nvidia_vbios.lifecycle.boot import UKI_GENERATIONS
+        self.write('/efi/EFI/Linux/normal.efi', pe_image({'.linux': b'kernel', '.initrd': b'normal', '.ucode': b'microcode',
+                                                          '.cmdline': b'root=UUID=reviewed rw', '.uname': KERNEL.encode()}))
+        adapter = self.adapter('uki', esp='/efi')
+        plan = adapter.plan(adapter.discover(KERNEL), 'vbios-uki-one')
+        base = UKI_GENERATIONS + '/vbios-uki-one'
+        self.assertEqual((plan.kernel_path, plan.initrd_path, plan.supplemental_paths),
+                         (base + '/vmlinuz', base + '/initramfs.img', (base + '/microcode-embedded.cpio',)))
+        self.assertTrue(all(name.startswith(base + '/') for name in plan.copy_files))
+        self.assertEqual([name for name in plan.roles if name.startswith('/efi/')], ['/efi/EFI/Linux/vbios-uki-one.efi'])
+
     def test_uki_missing_cmdline_requires_reviewed_value_and_pe_bounds(self):
         data = pe_image({'.linux': b'kernel', '.initrd': b'normal', '.uname': KERNEL.encode()})
         self.write('/efi/EFI/Linux/normal.efi', data)

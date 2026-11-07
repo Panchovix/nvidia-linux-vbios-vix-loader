@@ -19,6 +19,10 @@ _BACKENDS = {"grub", "systemd-boot", "uki"}
 _BUILDERS = {"dracut", "initramfs-tools", "mkinitcpio"}
 _COMPONENT = re.compile(r"[A-Za-z0-9_.+-]{1,240}")
 _PATH = re.compile(r"/[A-Za-z0-9_./+-]+")
+# The UKI backend keeps each generation's kernel, microcode and override
+# initramfs copies (the inputs it embeds) here, on the root filesystem, so the
+# ESP only receives the .efi. Older generations keep their recorded ESP paths.
+UKI_GENERATIONS = "/var/lib/nvidia-vbios/lifecycle/uki-generations"
 
 
 def entry_identity(value: str, backend: str = "grub") -> str:
@@ -508,7 +512,10 @@ class BootAdapter:
                         raise LifecycleError("normal UKI has unsupported runtime addons")
                 try:
                     version = sections.get(".uname", b"").rstrip(b"\0").decode("utf-8")
-                    options = sections.get(".cmdline", b"").rstrip(b"\0").decode("utf-8")
+                    # mkinitcpio and kernel-install copy /etc/kernel/cmdline verbatim, so
+                    # the section often ends in a line break before the NUL. Only that
+                    # trailing break is dropped: recorded options keep any other spacing.
+                    options = sections.get(".cmdline", b"").rstrip(b"\0").rstrip(b"\r\n").decode("utf-8")
                 except UnicodeError as exc:
                     raise LifecycleError("invalid UKI text section") from exc
                 if not version:
@@ -590,7 +597,7 @@ class BootAdapter:
         if any(char in title for char in ("\n", "\r", "\0")):
             raise LifecycleError("invalid managed boot title")
         boot_root = "/boot" if self.backend == "grub" else entry.metadata.get("boot_root", self.boot_root)
-        base = f"{boot_root}/nvidia-vbios/{managed_id}"
+        base = f"{UKI_GENERATIONS}/{managed_id}" if self.backend == "uki" else f"{boot_root}/nvidia-vbios/{managed_id}"
         kernel_path, initrd_path = base + "/vmlinuz", base + "/initramfs.img"
         copies = {}
         sections = entry.metadata.get("uki_sections")
@@ -612,7 +619,8 @@ class BootAdapter:
             prefix = "" if entry.metadata["loader_kernel"].startswith("/boot/") else "/boot"
             loader = lambda name: name[len(prefix):] if prefix else name
         else:
-            loader = lambda name: name[len(boot_root):]
+            # A UKI embeds its inputs: no loader path refers to the copies.
+            loader = (lambda name: "") if self.backend == "uki" else (lambda name: name[len(boot_root):])
             if self.backend == "uki":
                 entry_path, identity = f"{boot_root}/EFI/Linux/{managed_id}.efi", managed_id + ".efi"
             else:

@@ -21,7 +21,7 @@ from test_lifecycle_portable import pe_image
 from nvidia_vbios import cli
 from nvidia_vbios.bootstrap import (ACTION_TARGETS, Bootstrap, BootstrapError, BootstrapOperations, CONFIG, ENABLED,
                                     RUNTIME, STATE, UNITS)
-from nvidia_vbios.lifecycle.boot import BootAdapter
+from nvidia_vbios.lifecycle.boot import UKI_GENERATIONS, BootAdapter
 from nvidia_vbios.lifecycle.platform import ARCH_PLATFORM, DEBIAN_PLATFORM
 from nvidia_vbios.lifecycle.portable import EFI_GUID
 from nvidia_vbios.lifecycle.security import LifecycleError, atomic_write, digest
@@ -504,8 +504,12 @@ class PortableUninstallTests(unittest.TestCase):
         self.case.profile['signing'] = {'key': '/secure/module.key', 'certificate': '/secure/module.der'}
         self.case.profile['boot']['uki'] = {'signing': {'key': '/secure/efi.key', 'certificate': '/secure/efi.pem', 'trust': 'firmware-db'}}
         self.case.fresh_flow()
+        copies = self.root / UKI_GENERATIONS.lstrip('/')
+        generations = [f'{UKI_GENERATIONS}/{path.name}' for path in copies.iterdir()]
+        self.assertTrue(generations)  # the kernel/initramfs copies live on the root filesystem, not on the ESP
         report = self.uninstall()
         self.assertEqual(report['state'], 'uninstalled', report)
+        self.assertTrue(set(generations) <= set(report['removed']['boot']), report['removed'])
         self.assertFalse(list((self.root / 'efi/EFI/Linux').glob('vbios-*')))
         self.assertFalse((self.root / 'efi/nvidia-vbios').exists())
         self.assertEqual({name: (self.root / name).read_bytes() for name in keys}, keys)
